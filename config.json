@@ -1,0 +1,136 @@
+{
+  "_comment": "UAV Tree Search Simulation Config",
+  "_units": "All distances in metres. 1 ft = 0.3048 m.",
+  "_note": "Trees 20-40 ft tall, spaced 7 m (original grid). inspect_radius = 6 ft (1.83 m) clearance BEYOND the canopy edge — effective orbit radius = canopy_radius + 1.83 m, computed per tree in drone_controller._effective_radius(). Egg mass panels: 3-inch flat boxes flush on trunk surface.",
+
+  "area": {
+    "width": 24,
+    "length": 24,
+    "origin_x": 0,
+    "origin_y": 0,
+    "row_spacing": 7.0
+  },
+
+  "trees": [
+    {
+      "id": "tree_1",
+      "position": [-7, -7, 0],
+      "height": 7.5,
+      "radius": 0.45,
+      "_em_offset": "0.45 + 0.005 = 0.455 m from trunk axis",
+      "egg_masses": [
+        {"id": "T1-A", "position": [-6.545, -7.000, 0.50]},
+        {"id": "T1-B", "position": [-7.000, -6.545, 1.20]},
+        {"id": "T1-C", "position": [-7.455, -7.000, 1.70]}
+      ]
+    },
+    {
+      "id": "tree_2",
+      "position": [0, -7, 0],
+      "height": 6.5,
+      "radius": 0.40,
+      "_em_offset": "0.40 + 0.005 = 0.405 m from trunk axis",
+      "egg_masses": [
+        {"id": "T2-A", "position": [ 0.405, -7.000, 0.50]},
+        {"id": "T2-B", "position": [ 0.000, -6.595, 1.10]},
+        {"id": "T2-C", "position": [-0.405, -7.000, 1.60]}
+      ]
+    },
+    {
+      "id": "tree_3",
+      "position": [7, -7, 0],
+      "height": 9.0,
+      "radius": 0.50,
+      "_em_offset": "0.50 + 0.005 = 0.505 m from trunk axis",
+      "egg_masses": [
+        {"id": "T3-A", "position": [ 7.505, -7.000, 0.45]},
+        {"id": "T3-B", "position": [ 7.000, -7.505, 1.30]}
+      ]
+    },
+    {
+      "id": "tree_4",
+      "position": [-7, 0, 0],
+      "height": 8.0,
+      "radius": 0.45,
+      "_em_offset": "0.45 + 0.005 = 0.455 m from trunk axis",
+      "egg_masses": [
+        {"id": "T4-A", "position": [-6.545,  0.000, 0.50]},
+        {"id": "T4-B", "position": [-7.000,  0.455, 1.20]},
+        {"id": "T4-C", "position": [-7.455,  0.000, 1.70]}
+      ]
+    },
+    {
+      "id": "tree_5",
+      "position": [0, 0, 0],
+      "height": 6.2,
+      "radius": 0.38,
+      "_em_offset": "0.38 + 0.005 = 0.385 m from trunk axis",
+      "egg_masses": [
+        {"id": "T5-A", "position": [ 0.385,  0.000, 0.40]},
+        {"id": "T5-B", "position": [ 0.000, -0.385, 1.30]}
+      ]
+    },
+    {
+      "id": "tree_6",
+      "position": [7, 0, 0],
+      "height": 11.0,
+      "radius": 0.55,
+      "_em_offset": "0.55 + 0.005 = 0.555 m from trunk axis",
+      "egg_masses": [
+        {"id": "T6-A", "position": [ 7.555,  0.000, 0.50]},
+        {"id": "T6-B", "position": [ 7.000,  0.555, 1.20]},
+        {"id": "T6-C", "position": [ 6.445,  0.000, 1.80]}
+      ]
+    },
+    {
+      "id": "tree_7",
+      "position": [-7, 7, 0],
+      "height": 7.0,
+      "radius": 0.42,
+      "_em_offset": "0.42 + 0.005 = 0.425 m from trunk axis",
+      "egg_masses": [
+        {"id": "T7-A", "position": [-6.575,  7.000, 0.45]},
+        {"id": "T7-B", "position": [-7.000,  7.425, 1.50]}
+      ]
+    },
+    {
+      "id": "tree_8",
+      "position": [0, 7, 0],
+      "height": 9.5,
+      "radius": 0.48,
+      "_em_offset": "0.48 + 0.005 = 0.485 m from trunk axis",
+      "egg_masses": [
+        {"id": "T8-A", "position": [ 0.485,  7.000, 0.50]},
+        {"id": "T8-B", "position": [ 0.000,  7.485, 1.10]},
+        {"id": "T8-C", "position": [-0.485,  7.000, 1.65]}
+      ]
+    },
+    {
+      "id": "tree_9",
+      "position": [7, 7, 0],
+      "height": 12.0,
+      "radius": 0.60,
+      "_em_offset": "0.60 + 0.005 = 0.605 m from trunk axis",
+      "egg_masses": [
+        {"id": "T9-A", "position": [ 7.605,  7.000, 0.50]},
+        {"id": "T9-B", "position": [ 7.000,  7.605, 1.40]}
+      ]
+    }
+  ],
+
+  "drone": {
+    "start_position": [-12, -12, 1.5],
+    "cruise_altitude": 18.0,
+    "inspect_altitude": 2.0,
+    "transit_speed": 1.0,
+    "inspect_radius": 1.83,
+    "inspect_orbit_speed_deg": 20,
+    "inspect_slow_orbit_speed_deg": 5,
+    "capture_fps": 5
+  },
+
+  "simulation": {
+    "time_step": 0.01,
+    "gravity": -9.81
+  }
+}
