@@ -69,7 +69,8 @@ class DroneController:
         self.cruise_alt     = config["drone"]["cruise_altitude"]
         self.inspect_alt    = config["drone"].get("inspect_altitude", 2.0)     # m  ← trunk height
         self.transit_speed  = config["drone"]["transit_speed"]                 # m/s
-        self.inspect_radius = config["drone"].get("inspect_radius", 3.0)       # m
+        self.inspect_radius   = config["drone"].get("inspect_radius", 3.0)       # m  (canopy clearance during transit)
+        self.close_clearance  = config["drone"].get("inspect_trunk_clearance", 1.0)  # m  (trunk clearance during inspection)
         self.orbit_speed      = math.radians(
             config["drone"].get("inspect_orbit_speed_deg", 20))               # rad/s
         self.slow_orbit_speed = math.radians(
@@ -116,6 +117,14 @@ class DroneController:
         """
         canopy_radius = tree.get("radius", 0.30) * 4.0
         return canopy_radius + self.inspect_radius
+
+    def _close_radius(self, tree: dict) -> float:
+        """
+        Orbit radius used at inspect altitude — just outside the trunk.
+        Much smaller than _effective_radius so the camera is close enough
+        for Faster R-CNN to resolve egg masses on the bark.
+        """
+        return tree.get("radius", 0.30) + self.close_clearance
 
     def trunk_look_at(self, tree: dict) -> list[float]:
         """
@@ -192,25 +201,29 @@ class DroneController:
 
     def _step_descend(self, pos: np.ndarray) -> None:
         """
-        Descend vertically from cruise altitude to inspect altitude while
-        holding the XY position of the orbit entry point.
-        Once at inspect altitude, reset the orbit angle and switch to INSPECT.
+        Glide diagonally inward from (effective_radius, cruise_altitude) to
+        (close_radius, inspect_altitude).  Moving closer to the trunk as we
+        descend puts the camera near enough for Faster R-CNN to resolve egg
+        masses on the bark.
         """
-        tree   = self.current_tree
-        tp     = tree["position"]
-        r      = self._effective_radius(tree)
-        target = np.array(
-            [tp[0] + r, tp[1], self.inspect_alt],
+        tree    = self.current_tree
+        tp      = tree["position"]
+        close_r = self._close_radius(tree)
+        # Angle = 0 (east side) — matches orbit_entry_point
+        target  = np.array(
+            [tp[0] + close_r, tp[1], self.inspect_alt],
             dtype=float)
 
-        arrived = self._move_toward(pos, target)
+        # Use direct movement — avoidance rays fire against the trunk and push
+        # the drone back, preventing convergence to close_radius.
+        arrived = self._move_direct(pos, target)
 
         if arrived:
             self._orbit_angle = 0.0
             self._orbit_accum = 0.0
             self.state = self.INSPECT
             print(f"  [INSPECT]  Orbiting trunk  id = {tree['id']}"
-                  f"  alt = {self.inspect_alt} m  r = {r:.2f} m")
+                  f"  alt = {self.inspect_alt} m  r = {close_r:.2f} m")
 
     def _step_inspect(self) -> None:
         """
@@ -222,7 +235,7 @@ class DroneController:
         tree = self.current_tree
         tp   = np.array(tree["position"], dtype=float)
 
-        r = self._effective_radius(tree)
+        r = self._close_radius(tree)   # orbit close to the trunk at ground level
 
         # Slow down rotation when an egg mass is actively in view
         speed = self.slow_orbit_speed if self.egg_detected else self.orbit_speed
@@ -247,10 +260,24 @@ class DroneController:
 
     def _step_ascend(self, pos: np.ndarray) -> None:
         """
-        Climb back to cruise altitude at the current XY position before
-        transiting to the next tree.  Increments tree_idx on completion.
+        Glide diagonally outward from (close_radius, inspect_altitude) to
+        (effective_radius, cruise_altitude).  Moving farther from the trunk as
+        we climb gives canopy clearance before the next transit leg.
         """
-        target = np.array([pos[0], pos[1], self.cruise_alt], dtype=float)
+        tree = self.current_tree
+        if tree is not None:
+            tp    = np.array(tree["position"], dtype=float)
+            eff_r = self._effective_radius(tree)
+            # Preserve the orbit angle so the outward path follows the same
+            # radial direction as where the orbit finished
+            target = np.array([
+                tp[0] + eff_r * math.cos(self._orbit_angle),
+                tp[1] + eff_r * math.sin(self._orbit_angle),
+                self.cruise_alt,
+            ], dtype=float)
+        else:
+            target = np.array([pos[0], pos[1], self.cruise_alt], dtype=float)
+
         arrived = self._move_toward(pos, target)
 
         if arrived:
@@ -269,6 +296,30 @@ class DroneController:
             print("  [DONE]  Returned home — mission complete.")
 
     # ── Movement helpers ──────────────────────────────────────────────────────
+
+    def _move_direct(self, pos: np.ndarray, target: np.ndarray) -> bool:
+        """
+        Move one step toward *target* at transit speed WITHOUT obstacle avoidance.
+        Used for DESCEND/ASCEND legs whose paths are geometrically pre-validated
+        to be clear of all obstacles, so avoidance rays would only push the drone
+        away from the intended close-approach target.
+
+        Returns True when the drone is within WP_TOLERANCE of the target.
+        """
+        delta = target - pos
+        dist  = np.linalg.norm(delta)
+
+        if dist < self.WP_TOLERANCE:
+            return True
+
+        forward   = delta / dist
+        step_size = min(self.transit_speed * self.dt, dist)
+        new_pos   = pos + forward * step_size
+
+        self.current_yaw = math.atan2(float(forward[1]), float(forward[0]))
+        orn = p.getQuaternionFromEuler([0.0, 0.0, self.current_yaw])
+        p.resetBasePositionAndOrientation(self.drone_id, new_pos.tolist(), orn)
+        return False
 
     def _move_toward(self, pos: np.ndarray, target: np.ndarray) -> bool:
         """

@@ -54,9 +54,10 @@ def load_config(config_path: str, fps_override: int | None = None) -> dict:
 # ── Startup banner ────────────────────────────────────────────────────────────
 
 def print_banner(config: dict, n_egg_masses: int, log_dir) -> None:
-    orbit_spd   = config["drone"].get("inspect_orbit_speed_deg", 20)
-    orbit_r     = config["drone"].get("inspect_radius", 3.0)
-    inspect_alt = config["drone"].get("inspect_altitude", 2.0)
+    orbit_spd    = config["drone"].get("inspect_orbit_speed_deg", 20)
+    orbit_r      = config["drone"].get("inspect_radius", 3.0)
+    trunk_clr    = config["drone"].get("inspect_trunk_clearance", 1.0)
+    inspect_alt  = config["drone"].get("inspect_altitude", 2.0)
     print("=" * 60)
     print("  UAV Tree Inspection Simulation")
     print("=" * 60)
@@ -65,7 +66,8 @@ def print_banner(config: dict, n_egg_masses: int, log_dir) -> None:
     print(f"  Transit speed  : {config['drone']['transit_speed']} m/s")
     print(f"  Cruise alt     : {config['drone']['cruise_altitude']} m")
     print(f"  Inspect alt    : {inspect_alt} m  (trunk level)")
-    print(f"  Orbit radius   : {orbit_r} m")
+    print(f"  Canopy radius  : {orbit_r} m  (clearance beyond canopy during transit)")
+    print(f"  Trunk clearance: {trunk_clr} m  (orbit radius = trunk_r + {trunk_clr} m at inspect alt)")
     print(f"  Orbit speed    : {orbit_spd} °/s  "
           f"(360° ≈ {360 / orbit_spd:.0f} s / tree)")
     print(f"  Capture FPS    : {config['drone']['capture_fps']}")

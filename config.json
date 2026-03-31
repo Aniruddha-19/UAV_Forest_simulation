@@ -124,9 +124,10 @@
     "inspect_altitude": 2.0,
     "transit_speed": 1.0,
     "inspect_radius": 1.83,
+    "inspect_trunk_clearance": 1.0,
     "inspect_orbit_speed_deg": 20,
     "inspect_slow_orbit_speed_deg": 5,
-    "capture_fps": 5
+    "capture_fps": 1.7
   },
 
   "simulation": {
