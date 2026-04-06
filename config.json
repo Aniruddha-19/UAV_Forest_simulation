@@ -127,6 +127,9 @@
     "inspect_trunk_clearance": 1.0,
     "inspect_orbit_speed_deg": 20,
     "inspect_slow_orbit_speed_deg": 5,
+    "inspect_min_clearance": 0.5,
+    "inspect_approach_speed": 0.05,
+    "camera_source": null,
     "capture_fps": 1.7
   },
 

@@ -17,46 +17,41 @@ from camera import IMG_W, IMG_H
 
 # ── Frame annotation ──────────────────────────────────────────────────────────
 
-def annotate(frame:       np.ndarray,
-             geo_dets:    list[tuple[str, int, int]],
-             img_boxes:   list[tuple[int, int, int, int]],
-             rcnn_boxes:  list[tuple[int, int, int, int]],
-             drone_pos:   np.ndarray,
-             state:       str,
-             tree_label:  str,
-             tree_idx:    int,
-             total_trees: int,
-             orbit_pct:   float,
-             frame_no:    int,
-             saved_no:    int,
-             fps:         int) -> np.ndarray:
+def annotate(frame:        np.ndarray,
+             rcnn_boxes:   list[tuple[int, int, int, int]],
+             drone_pos:    np.ndarray,
+             state:        str,
+             tree_label:   str,
+             tree_idx:     int,
+             total_trees:  int,
+             orbit_pct:    float,
+             orbit_radius: float,
+             frame_no:     int,
+             saved_no:     int,
+             fps:          int) -> np.ndarray:
     """
     Compose all annotations onto a copy of *frame* and return the result.
 
     Layers (drawn in order):
-      1. Geometric detections   — cyan circles with ID labels
-      2. Segmentation detections — yellow bounding rectangles
-      3. Faster R-CNN detections — red bounding rectangles
-      4. Orbit progress bar     — shown only during INSPECT state
-      5. HUD text panel         — state, tree, position, frame counters
-      6. Detection banner       — bright green banner when RCNN detects egg mass
-      7. Legend                 — key for the detection colours
+      1. Faster R-CNN detections — red bounding rectangles
+      2. Orbit progress bar     — shown only during INSPECT state
+      3. HUD text panel         — state, tree, position, orbit radius, frame counters
+      4. Detection banner       — bright green banner when RCNN detects egg mass
 
     Parameters
     ----------
-    frame       : processed BGR frame from camera.capture_and_process()
-    geo_dets    : list of (label, px, py) from camera.check_egg_in_fov()
-    img_boxes   : list of (x,y,w,h) bounding boxes from camera.detect_yellow_blobs()
-    rcnn_boxes  : list of (x1,y1,x2,y2) from detector.detect_egg_masses()
-    drone_pos   : drone world position [x, y, z]
-    state       : controller state string ("TRANSIT", "INSPECT", "HOME")
-    tree_label  : ID string of the current tree, or "—"
-    tree_idx    : 1-based index of the current tree
-    total_trees : total number of trees in the scene
-    orbit_pct   : fraction of the current orbit completed (0.0 – 1.0)
-    frame_no    : total frames rendered so far
-    saved_no    : frames saved to disk so far (detection-only subset)
-    fps         : configured capture frame rate
+    frame        : processed BGR frame from camera.capture_and_process()
+    rcnn_boxes   : list of (x1,y1,x2,y2) from detector.detect_egg_masses()
+    drone_pos    : drone world position [x, y, z]
+    state        : controller state string ("TRANSIT", "INSPECT", "HOME")
+    tree_label   : ID string of the current tree, or "—"
+    tree_idx     : 1-based index of the current tree
+    total_trees  : total number of trees in the scene
+    orbit_pct    : fraction of the current orbit completed (0.0 – 1.0)
+    orbit_radius : current orbit radius in metres (shrinks during INSPECT)
+    frame_no     : total frames rendered so far
+    saved_no     : frames saved to disk so far (detection-only subset)
+    fps          : configured capture frame rate
 
     Returns
     -------
@@ -64,15 +59,12 @@ def annotate(frame:       np.ndarray,
     """
     out = frame.copy()
 
-    _draw_geometric_detections(out, geo_dets)
-    _draw_segmentation_boxes(out, img_boxes)
     _draw_rcnn_boxes(out, rcnn_boxes)
     _draw_orbit_bar(out, state, orbit_pct)
     _draw_hud(out, state, tree_label, tree_idx, total_trees,
-               drone_pos, len(geo_dets), len(img_boxes), len(rcnn_boxes),
+               drone_pos, len(rcnn_boxes), orbit_radius,
                frame_no, saved_no, fps)
     _draw_detection_banner(out, rcnn_boxes)
-    _draw_legend(out)
 
     return out
 
@@ -98,29 +90,6 @@ def close_windows() -> None:
 
 
 # ── Private drawing helpers ───────────────────────────────────────────────────
-
-def _draw_geometric_detections(img: np.ndarray,
-                                geo_dets: list[tuple[str, int, int]]) -> None:
-    """
-    For each geometrically detected egg mass draw a cyan circle and its
-    ID label at the projected image location.
-    """
-    COLOUR = (0, 210, 210)   # cyan
-    for label, px, py in geo_dets:
-        cv2.circle(img, (px, py), 14, COLOUR, 2)
-        cv2.putText(img, label, (px + 16, py - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOUR, 1)
-
-
-def _draw_segmentation_boxes(img: np.ndarray,
-                              img_boxes: list[tuple[int, int, int, int]]) -> None:
-    """
-    Draw a yellow bounding rectangle for each blob found by HSV segmentation.
-    """
-    COLOUR = (0, 220, 255)   # yellow-orange
-    for (x, y, w, h) in img_boxes:
-        cv2.rectangle(img, (x, y), (x + w, y + h), COLOUR, 1)
-
 
 def _draw_rcnn_boxes(img: np.ndarray,
                      rcnn_boxes: list[tuple[int, int, int, int]]) -> None:
@@ -173,7 +142,7 @@ def _draw_hud(img: np.ndarray,
               state: str, tree_label: str,
               tree_idx: int, total_trees: int,
               drone_pos: np.ndarray,
-              n_geo: int, n_seg: int, n_rcnn: int,
+              n_rcnn: int, orbit_radius: float,
               frame_no: int, saved_no: int,
               fps: int) -> None:
     """
@@ -184,6 +153,10 @@ def _draw_hud(img: np.ndarray,
     COLOUR_TRANSIT  = (40, 255, 60)
     colour = COLOUR_INSPECT if state == "INSPECT" else COLOUR_TRANSIT
 
+    radius_line = (f"Radius : {orbit_radius:.2f} m"
+                   if state == "INSPECT"
+                   else "Radius : —")
+
     hud_lines = [
         f"State  : {state}",
         f"Tree   : {tree_label}  ({tree_idx} / {total_trees})",
@@ -191,7 +164,8 @@ def _draw_hud(img: np.ndarray,
         f"Frame  : {frame_no}   Saved: {saved_no}",
         (f"Pos    : ({drone_pos[0]:.1f},  {drone_pos[1]:.1f},"
          f"  {drone_pos[2]:.1f}) m"),
-        f"Geo    : {n_geo}   Seg: {n_seg}   RCNN: {n_rcnn}",
+        radius_line,
+        f"RCNN   : {n_rcnn} detection{'s' if n_rcnn != 1 else ''}",
     ]
 
     for i, line in enumerate(hud_lines):
@@ -215,6 +189,6 @@ def _draw_detection_banner(img: np.ndarray,
 def _draw_legend(img: np.ndarray) -> None:
     """Small colour key at the very bottom of the frame."""
     cv2.putText(img,
-                "[cyan] = geometric FOV    [yellow] = colour seg    [red] = RCNN",
+                "[red] = Faster R-CNN detection",
                 (10, IMG_H - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (160, 160, 160), 1)

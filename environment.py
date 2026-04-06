@@ -22,9 +22,9 @@ _EGG_IMAGES = [
     os.path.join(_SCRIPT_DIR, "1.png"),
     os.path.join(_SCRIPT_DIR, "2.png"),
     os.path.join(_SCRIPT_DIR, "3.png"),
-    os.path.join(_SCRIPT_DIR, "4.jpg"),
-    os.path.join(_SCRIPT_DIR, "5.jpg"),
     os.path.join(_SCRIPT_DIR, "6.jpg"),
+    os.path.join(_SCRIPT_DIR, "8.jpg"),
+    os.path.join(_SCRIPT_DIR, "9.jpg"),
 ]
 
 

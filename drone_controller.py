@@ -70,11 +70,13 @@ class DroneController:
         self.inspect_alt    = config["drone"].get("inspect_altitude", 2.0)     # m  ← trunk height
         self.transit_speed  = config["drone"]["transit_speed"]                 # m/s
         self.inspect_radius   = config["drone"].get("inspect_radius", 3.0)       # m  (canopy clearance during transit)
-        self.close_clearance  = config["drone"].get("inspect_trunk_clearance", 1.0)  # m  (trunk clearance during inspection)
+        self.close_clearance  = config["drone"].get("inspect_trunk_clearance", 1.0)  # m  (starting orbit clearance)
+        self.min_orbit_clearance = config["drone"].get("inspect_min_clearance", 0.5)  # m  (minimum clearance before trunk)
+        self.approach_speed   = config["drone"].get("inspect_approach_speed", 0.05)   # m/s (radius reduction rate)
         self.orbit_speed      = math.radians(
             config["drone"].get("inspect_orbit_speed_deg", 20))               # rad/s
         self.slow_orbit_speed = math.radians(
-            config["drone"].get("inspect_slow_orbit_speed_deg", 5))           # rad/s — used when egg mass detected
+            config["drone"].get("inspect_slow_orbit_speed_deg", 5))           # rad/s — used when R-CNN detects
 
         self.home_pos = np.array(config["drone"]["start_position"], dtype=float)
 
@@ -83,7 +85,8 @@ class DroneController:
         self.current_yaw    = 0.0    # drone body yaw in world frame (radians)
         self._orbit_angle   = 0.0    # current angle on the orbit circle (radians)
         self._orbit_accum   = 0.0    # radians completed in the current orbit
-        self.egg_detected   = False  # set True by main loop when an egg mass is in view
+        self._current_orbit_radius = 0.0  # dynamic radius during INSPECT; shrinks when R-CNN misses
+        self.egg_detected   = False  # set True by main loop when R-CNN finds an egg mass
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -103,6 +106,11 @@ class DroneController:
     def orbit_progress(self) -> float:
         """Fraction of the current orbit completed (0.0 – 1.0)."""
         return self._orbit_accum / (2 * math.pi)
+
+    @property
+    def orbit_radius(self) -> float:
+        """Current orbit radius (m). Shrinks toward trunk during INSPECT when R-CNN isn't detecting."""
+        return self._current_orbit_radius
 
     def _effective_radius(self, tree: dict) -> float:
         """
@@ -221,6 +229,8 @@ class DroneController:
         if arrived:
             self._orbit_angle = 0.0
             self._orbit_accum = 0.0
+            self._current_orbit_radius = close_r   # start at full close radius; shrinks if R-CNN misses
+            self.egg_detected = False              # ensure approach starts immediately on entry
             self.state = self.INSPECT
             print(f"  [INSPECT]  Orbiting trunk  id = {tree['id']}"
                   f"  alt = {self.inspect_alt} m  r = {close_r:.2f} m")
@@ -235,9 +245,20 @@ class DroneController:
         tree = self.current_tree
         tp   = np.array(tree["position"], dtype=float)
 
-        r = self._close_radius(tree)   # orbit close to the trunk at ground level
+        # When R-CNN hasn't detected anything, shrink the orbit radius toward the
+        # trunk until either a detection fires or the minimum safe clearance is
+        # reached.  Once R-CNN detects, hold the current radius and slow down so
+        # the model can capture the best possible frames.
+        if not self.egg_detected:
+            min_r = tree.get("radius", 0.30) + self.min_orbit_clearance
+            self._current_orbit_radius = max(
+                min_r,
+                self._current_orbit_radius - self.approach_speed * self.dt,
+            )
 
-        # Slow down rotation when an egg mass is actively in view
+        r = self._current_orbit_radius
+
+        # Slow orbit on detection so R-CNN gets more frames of the egg mass
         speed = self.slow_orbit_speed if self.egg_detected else self.orbit_speed
 
         delta_angle        = speed * self.dt

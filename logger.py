@@ -84,33 +84,6 @@ class SimulationLogger:
 
     # ── Logging methods ───────────────────────────────────────────────────────
 
-    def log_geometric_detection(self,
-                                 egg_id:    str,
-                                 egg_pos:   list,
-                                 drone_pos,
-                                 state:     str) -> None:
-        """
-        Write one row for a geometrically confirmed egg mass sighting.
-
-        Parameters
-        ----------
-        egg_id    : config ID string of the egg mass
-        egg_pos   : [x, y, z] world position of the egg mass
-        drone_pos : drone world position (numpy array or list)
-        state     : current controller state string
-        """
-        self._csv_writer.writerow([
-            f"{self.elapsed:.3f}",
-            self.frame_no,
-            self.saved_no,
-            egg_id,
-            *egg_pos,
-            *list(drone_pos),
-            state,
-            "geometric_fov",
-        ])
-        self._csv_file.flush()
-
     def log_rcnn_detection(self,
                            n_boxes:   int,
                            drone_pos,
@@ -136,32 +109,6 @@ class SimulationLogger:
         ])
         self._csv_file.flush()
 
-    def log_segmentation_detection(self,
-                                    n_blobs:   int,
-                                    drone_pos,
-                                    state:     str) -> None:
-        """
-        Write one row summarising the yellow-blob segmentation result for
-        a frame (no world coordinates — purely image-level detection).
-
-        Parameters
-        ----------
-        n_blobs   : number of yellow blobs found in the frame
-        drone_pos : drone world position
-        state     : current controller state string
-        """
-        self._csv_writer.writerow([
-            f"{self.elapsed:.3f}",
-            self.frame_no,
-            self.saved_no,
-            f"seg_{n_blobs}_blobs",
-            "", "", "",            # no world coordinates for seg rows
-            *list(drone_pos),
-            state,
-            "colour_segmentation",
-        ])
-        self._csv_file.flush()
-
     def save_frame(self, annotated_frame) -> None:
         """
         Save *annotated_frame* as a JPEG only when egg masses were detected.
@@ -180,11 +127,9 @@ class SimulationLogger:
 
     def print_heartbeat(self,
                          drone_pos,
-                         state:     str,
+                         state:      str,
                          tree_label: str,
-                         n_geo:     int,
-                         n_seg:     int,
-                         n_rcnn:    int,
+                         n_rcnn:     int,
                          capture_fps: int) -> None:
         """
         Print a one-line status update every 5 seconds of rendered time.
@@ -196,7 +141,7 @@ class SimulationLogger:
             f" saved={self.saved_no:4d} | {state:8s} |"
             f" tree={tree_label:8s} |"
             f" Pos({drone_pos[0]:5.1f},{drone_pos[1]:5.1f},{drone_pos[2]:4.1f})"
-            f" | geo={n_geo} seg={n_seg} rcnn={n_rcnn}"
+            f" | rcnn={n_rcnn}"
         )
 
     def print_summary(self) -> None:

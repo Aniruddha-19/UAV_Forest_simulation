@@ -37,12 +37,14 @@ def get_camera_vectors(drone_orn,
     """
     Derive the camera's forward and up unit vectors from the drone's pose.
 
-    During transit (look_at = None)
-        The camera points straight down (nadir view).
+    When look_at is None
+        The camera points straight down (nadir), camera-up from drone body-Y.
 
-    During inspect (look_at = canopy centre)
-        The camera points toward the canopy centre, so as the drone orbits
-        the tree the viewing angle sweeps continuously around the canopy.
+    When look_at is set (forward transit or trunk inspection)
+        The camera points toward look_at.  Camera-up is derived from world-Z
+        so the image is always upright — critical when looking horizontally
+        (e.g. forward during transit).  Falls back to drone body-Y only when
+        looking straight up or down (degenerate cross-product).
 
     Parameters
     ----------
@@ -54,8 +56,7 @@ def get_camera_vectors(drone_orn,
     -------
     (cam_fwd, cam_up) — unit vectors in world space
     """
-    rot    = np.array(p.getMatrixFromQuaternion(drone_orn)).reshape(3, 3)
-    cam_up = rot @ np.array([0.0, 1.0, 0.0])   # drone body-Y → camera up
+    rot = np.array(p.getMatrixFromQuaternion(drone_orn)).reshape(3, 3)
 
     if look_at is not None:
         direction = look_at - drone_pos
@@ -63,8 +64,23 @@ def get_camera_vectors(drone_orn,
         cam_fwd   = (direction / dist
                      if dist > 0
                      else rot @ np.array([0.0, 0.0, -1.0]))
+
+        # Build an upright camera-up using world-Z as reference.
+        # cam_rgt = cam_fwd × world_Z  →  cam_up = cam_rgt × cam_fwd
+        # This degenerates when cam_fwd is parallel to world-Z (nadir/zenith).
+        world_up = np.array([0.0, 0.0, 1.0])
+        cam_rgt  = np.cross(cam_fwd, world_up)
+        rgt_len  = np.linalg.norm(cam_rgt)
+        if rgt_len > 1e-6:
+            cam_rgt /= rgt_len
+            cam_up   = np.cross(cam_rgt, cam_fwd)
+            cam_up  /= np.linalg.norm(cam_up)
+        else:
+            cam_up = rot @ np.array([0.0, 1.0, 0.0])   # fallback: drone body-Y
     else:
-        cam_fwd = rot @ np.array([0.0, 0.0, -1.0])   # nadir
+        # Nadir — straight down
+        cam_fwd = rot @ np.array([0.0, 0.0, -1.0])
+        cam_up  = rot @ np.array([0.0, 1.0, 0.0])
 
     return cam_fwd, cam_up
 
@@ -103,26 +119,37 @@ def build_camera_matrices(drone_pos: np.ndarray,
 
 # ── Frame capture & image processing ─────────────────────────────────────────
 
-def capture_and_process(view_matrix, proj_matrix) -> np.ndarray:
+def capture_and_process(view_matrix, proj_matrix,
+                         external_frame: np.ndarray | None = None) -> np.ndarray:
     """
-    Render a frame from PyBullet and apply the image-processing pipeline:
+    Acquire a frame and apply the image-processing pipeline:
 
-      Step 1 — Raw render   : getCameraImage → RGBA numpy array
+      Step 1 — Acquire      : external BGR frame (resized) OR PyBullet render
       Step 2 — CLAHE        : contrast-limited adaptive histogram equalisation
                               on the L-channel (LAB colour space)
       Step 3 — Sharpening   : unsharp-mask convolution kernel
+
+    Parameters
+    ----------
+    view_matrix    : PyBullet view matrix (used only when external_frame is None)
+    proj_matrix    : PyBullet projection matrix (same)
+    external_frame : BGR frame from cv2.VideoCapture, or None to use renderer
 
     Returns
     -------
     Processed BGR image as a uint8 numpy array (H × W × 3).
     """
-    # ── Step 1: render ───────────────────────────────────────────────────────
-    _, _, rgba, _, _ = p.getCameraImage(
-        IMG_W, IMG_H, view_matrix, proj_matrix,
-        renderer=p.ER_TINY_RENDERER)
-    bgr = cv2.cvtColor(
-        np.array(rgba, dtype=np.uint8)[:, :, :3],
-        cv2.COLOR_RGB2BGR)
+    # ── Step 1: acquire frame ────────────────────────────────────────────────
+    if external_frame is not None:
+        # Resize the external camera frame to the configured resolution
+        bgr = cv2.resize(external_frame, (IMG_W, IMG_H))
+    else:
+        _, _, rgba, _, _ = p.getCameraImage(
+            IMG_W, IMG_H, view_matrix, proj_matrix,
+            renderer=p.ER_BULLET_HARDWARE_OPENGL)
+        bgr = cv2.cvtColor(
+            np.array(rgba, dtype=np.uint8).reshape(IMG_H, IMG_W, 4)[:, :, :3],
+            cv2.COLOR_RGB2BGR)
 
     # ── Step 2: CLAHE contrast enhancement ───────────────────────────────────
     lab          = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)

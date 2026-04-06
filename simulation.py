@@ -26,12 +26,13 @@ Controls
 import argparse
 import json
 import math
+import time
 
+import cv2
 import numpy as np
 import pybullet as p
 
 from camera           import (build_camera_matrices, capture_and_process,
-                               check_egg_in_fov, detect_yellow_blobs,
                                get_camera_vectors)
 from detector         import detect_egg_masses
 from drone_controller import DroneController
@@ -87,21 +88,41 @@ def run(config_path: str, fps_override: int | None = None) -> None:
 
     # ── Step 1: Initialise world & build scene ────────────────────────────────
     init_world(config)
-    egg_masses = build_scene(config)                       # spawn trees + eggs
+    build_scene(config)                                    # spawn trees + eggs
     drone_id   = spawn_drone(config["drone"]["start_position"])
 
     # ── Step 2: Initialise drone controller ───────────────────────────────────
     controller = DroneController(drone_id, config, config["trees"])
 
-    # ── Step 3: Open logger ───────────────────────────────────────────────────
+    # ── Step 3: Optional external camera source ───────────────────────────────
+    # Set "camera_source" in config to a device index (0, 1, …) or a video
+    # file path.  When set, frames come from that source instead of PyBullet.
+    _cam_src = config["drone"].get("camera_source", None)
+    _cap     = None
+    if _cam_src is not None:
+        _cap = cv2.VideoCapture(_cam_src)
+        if _cap.isOpened():
+            print(f"[camera] External source opened: {_cam_src!r}")
+        else:
+            print(f"[WARNING] Cannot open camera_source={_cam_src!r}, "
+                  "falling back to PyBullet renderer.")
+            _cap = None
+
+    # ── Step 4: Open logger ───────────────────────────────────────────────────
     with SimulationLogger() as log:
-        print_banner(config, len(egg_masses), log.run_dir.resolve())
+        n_egg_masses = sum(len(t.get("egg_masses", [])) for t in config["trees"])
+        print_banner(config, n_egg_masses, log.run_dir.resolve())
 
         physics_step = 0
 
         try:
             # ── Main loop ─────────────────────────────────────────────────────
             while not controller.done:
+
+                # Deadline for this step — caps simulation at 1× real time.
+                # Steps that include R-CNN inference naturally exceed dt;
+                # the sleep is simply skipped so there is no accumulating lag.
+                _step_deadline = time.perf_counter() + dt
 
                 # Advance drone + physics
                 controller.step()
@@ -110,55 +131,60 @@ def run(config_path: str, fps_override: int | None = None) -> None:
 
                 # Only process camera every N physics steps
                 if physics_step % steps_per_frame != 0:
+                    _remaining = _step_deadline - time.perf_counter()
+                    if _remaining > 0:
+                        time.sleep(_remaining)
                     continue
 
-                # ── Step 4: Camera setup ──────────────────────────────────────
+                # ── Step 5: Camera setup ──────────────────────────────────────
                 drone_pos, drone_orn = controller.pose()
 
-                # During DESCEND/INSPECT/ASCEND the camera looks at the trunk;
-                # during TRANSIT / HOME it looks straight down (nadir).
-                look_at = None
+                # Camera always faces forward:
+                #   INSPECT / DESCEND / ASCEND  → look at mid-trunk point
+                #   TRANSIT / HOME              → look horizontally in the
+                #                                 direction of travel
                 if controller.state in (DroneController.DESCEND,
                                         DroneController.INSPECT,
                                         DroneController.ASCEND):
-                    tree = controller.current_tree
-                    if tree:
-                        look_at = np.array(controller.trunk_look_at(tree))
+                    tree    = controller.current_tree
+                    look_at = (np.array(controller.trunk_look_at(tree))
+                               if tree else None)
+                else:
+                    fwd     = np.array([math.cos(controller.current_yaw),
+                                        math.sin(controller.current_yaw),
+                                        0.0])
+                    look_at = drone_pos + fwd * 10.0   # 10 m ahead, same altitude
 
                 cam_fwd, cam_up = get_camera_vectors(
                     drone_orn, drone_pos, look_at)
                 view, proj = build_camera_matrices(drone_pos, cam_fwd, cam_up)
 
-                # ── Step 5: Capture + process frame ───────────────────────────
-                frame     = capture_and_process(view, proj)
-                img_boxes = detect_yellow_blobs(frame)
+                # ── Step 6: Capture + process frame ───────────────────────────
+                # Read from external camera if configured; fall back to renderer.
+                ext_frame = None
+                if _cap is not None:
+                    ret, ext_frame = _cap.read()
+                    if not ret:                      # loop when video file ends
+                        _cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret, ext_frame = _cap.read()
+                    if not ret:
+                        ext_frame = None             # give up, use renderer
 
-                # ── Step 5b: Faster R-CNN inference ───────────────────────────
+                frame = capture_and_process(view, proj, ext_frame)
+
+                # ── Step 5b: Faster R-CNN inference (sole detector) ───────────
                 rcnn_boxes = detect_egg_masses(frame)
-
-                # ── Step 6: Detect egg masses (geometric FOV check) ───────────
-                geo_dets = []
-                for em in egg_masses:
-                    visible, px, py = check_egg_in_fov(
-                        drone_pos, cam_fwd, cam_up, em["position"], em["body"])
-                    if visible:
-                        geo_dets.append((em["id"], px, py))
-                        log.log_geometric_detection(
-                            em["id"], em["position"],
-                            drone_pos, controller.state)
-
-                if img_boxes:
-                    log.log_segmentation_detection(
-                        len(img_boxes), drone_pos, controller.state)
 
                 if rcnn_boxes:
                     log.log_rcnn_detection(
                         len(rcnn_boxes), drone_pos, controller.state)
 
-                # Slow the orbit whenever an egg mass is geometrically visible
-                controller.egg_detected = bool(geo_dets)
+                # R-CNN result drives both orbit-speed and approach behaviour:
+                #   detected  → slow orbit, hold current radius
+                #   not found → normal orbit speed, shrink radius toward trunk
+                controller.egg_detected = bool(rcnn_boxes)
 
-                # ── Step 7: Annotate frame ────────────────────────────────────
+                # ── Step 6: Annotate frame ────────────────────────────────────
                 tree        = controller.current_tree
                 tree_label  = tree["id"] if tree else "—"
                 tree_idx    = min(controller.tree_idx + 1,
@@ -168,40 +194,47 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                                else 0.0)
 
                 annotated = annotate(
-                    frame      = frame,
-                    geo_dets   = geo_dets,
-                    img_boxes  = img_boxes,
-                    rcnn_boxes = rcnn_boxes,
-                    drone_pos  = drone_pos,
-                    state      = controller.state,
-                    tree_label = tree_label,
-                    tree_idx   = tree_idx,
-                    total_trees= len(config["trees"]),
-                    orbit_pct  = orbit_pct,
-                    frame_no   = log.frame_no,
-                    saved_no   = log.saved_no,
-                    fps        = capture_fps,
+                    frame        = frame,
+                    rcnn_boxes   = rcnn_boxes,
+                    drone_pos    = drone_pos,
+                    state        = controller.state,
+                    tree_label   = tree_label,
+                    tree_idx     = tree_idx,
+                    total_trees  = len(config["trees"]),
+                    orbit_pct    = orbit_pct,
+                    orbit_radius = controller.orbit_radius,
+                    frame_no     = log.frame_no,
+                    saved_no     = log.saved_no,
+                    fps          = capture_fps,
                 )
 
-                # ── Step 8: Save frame only when Faster R-CNN detects egg mass ─
+                # ── Step 7: Save frame when R-CNN detects egg mass ────────────
                 if rcnn_boxes:
                     log.save_frame(annotated)
 
-                # ── Step 9: Display + heartbeat ───────────────────────────────
+                # ── Step 8: Display + heartbeat ───────────────────────────────
                 if show(annotated):
                     print("\nStopped by user (q).")
                     break
 
                 log.print_heartbeat(
                     drone_pos, controller.state, tree_label,
-                    len(geo_dets), len(img_boxes), len(rcnn_boxes), capture_fps)
+                    len(rcnn_boxes), capture_fps)
 
                 log.tick_frame()
+
+                # Pace camera steps to real-time (R-CNN inference may already
+                # have consumed more than dt, in which case we skip the sleep)
+                _remaining = _step_deadline - time.perf_counter()
+                if _remaining > 0:
+                    time.sleep(_remaining)
 
         except KeyboardInterrupt:
             print("\nInterrupted (Ctrl-C).")
 
         finally:
+            if _cap is not None:
+                _cap.release()
             close_windows()
             p.disconnect()
             log.print_summary()
