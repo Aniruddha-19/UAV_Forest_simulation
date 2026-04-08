@@ -121,8 +121,8 @@ def spawn_egg_mass(position: list,
     Geometry
     --------
       halfExtents = [depth_half, face_half, face_half]
-        depth_half = 0.005 m  (1 cm panel thickness, thin dimension)
-        face_half  = 0.0381 m (1.5 in — half of the 3-inch face)
+        depth_half = 0.0005 m  (1 mm panel thickness — near-flat decal)
+        face_half  = 0.12 m    (half of 24 cm face — >32 px at RCNN min anchor)
 
       The box's local +X axis is rotated to point radially outward from the
       trunk so the large ±X faces (which carry the texture) face outward and
@@ -139,8 +139,9 @@ def spawn_egg_mass(position: list,
     -------
     body_id — PyBullet body ID
     """
-    face_half  = 0.0381   # half of 3-inch face  (width and height of panel)
-    depth_half = 0.005    # half-thickness of the panel (1 cm total depth)
+    face_half  = 0.12     # half of 24 cm face — gives ~90 px at 1 m orbit distance,
+                          # safely above Faster R-CNN FPN's 32 px minimum anchor
+    depth_half = 0.0005   # half-thickness of the panel (1 mm total depth — near-flat decal)
 
     # Outward angle from trunk axis → rotation around world Z
     dx    = position[0] - trunk_position[0]

@@ -119,15 +119,12 @@ def build_camera_matrices(drone_pos: np.ndarray,
 
 # ── Frame capture & image processing ─────────────────────────────────────────
 
-def capture_and_process(view_matrix, proj_matrix,
-                         external_frame: np.ndarray | None = None) -> np.ndarray:
+def capture_frame(view_matrix, proj_matrix,
+                  external_frame: np.ndarray | None = None) -> np.ndarray:
     """
-    Acquire a frame and apply the image-processing pipeline:
-
-      Step 1 — Acquire      : external BGR frame (resized) OR PyBullet render
-      Step 2 — CLAHE        : contrast-limited adaptive histogram equalisation
-                              on the L-channel (LAB colour space)
-      Step 3 — Sharpening   : unsharp-mask convolution kernel
+    Acquire a raw BGR frame from the PyBullet renderer or an external source.
+    No image processing is applied — the returned image matches the natural
+    pixel distribution of the source, which is what the RCNN model expects.
 
     Parameters
     ----------
@@ -137,36 +134,59 @@ def capture_and_process(view_matrix, proj_matrix,
 
     Returns
     -------
-    Processed BGR image as a uint8 numpy array (H × W × 3).
+    Raw BGR image as a uint8 numpy array (H × W × 3).
     """
-    # ── Step 1: acquire frame ────────────────────────────────────────────────
     if external_frame is not None:
-        # Resize the external camera frame to the configured resolution
-        bgr = cv2.resize(external_frame, (IMG_W, IMG_H))
-    else:
-        _, _, rgba, _, _ = p.getCameraImage(
-            IMG_W, IMG_H, view_matrix, proj_matrix,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL)
-        bgr = cv2.cvtColor(
-            np.array(rgba, dtype=np.uint8).reshape(IMG_H, IMG_W, 4)[:, :, :3],
-            cv2.COLOR_RGB2BGR)
+        return cv2.resize(external_frame, (IMG_W, IMG_H))
 
-    # ── Step 2: CLAHE contrast enhancement ───────────────────────────────────
-    lab          = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    _, _, rgba, _, _ = p.getCameraImage(
+        IMG_W, IMG_H, view_matrix, proj_matrix,
+        renderer=p.ER_BULLET_HARDWARE_OPENGL)
+    return cv2.cvtColor(
+        np.array(rgba, dtype=np.uint8).reshape(IMG_H, IMG_W, 4)[:, :, :3],
+        cv2.COLOR_RGB2BGR)
+
+
+def enhance_frame(raw_bgr: np.ndarray) -> np.ndarray:
+    """
+    Apply the display-enhancement pipeline to a raw BGR frame:
+
+      Step 1 — CLAHE        : contrast-limited adaptive histogram equalisation
+                              on the L-channel (LAB colour space)
+      Step 2 — Sharpening   : unsharp-mask convolution kernel
+
+    This is applied ONLY for the visualisation feed.  The RCNN detector must
+    receive the raw (unenhanced) frame so that pixel statistics match the
+    ImageNet distribution the model's internal normalisation layer expects.
+
+    Parameters
+    ----------
+    raw_bgr : raw BGR frame from capture_frame()
+
+    Returns
+    -------
+    Enhanced BGR image as a uint8 numpy array (H × W × 3).
+    """
+    # ── Step 1: CLAHE contrast enhancement ───────────────────────────────────
+    lab          = cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2LAB)
     l_ch, a, b  = cv2.split(lab)
     clahe        = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     l_ch         = clahe.apply(l_ch)
     enhanced     = cv2.cvtColor(cv2.merge([l_ch, a, b]), cv2.COLOR_LAB2BGR)
 
-    # ── Step 3: unsharp-mask sharpening ──────────────────────────────────────
+    # ── Step 2: unsharp-mask sharpening ──────────────────────────────────────
     sharpen_kernel = np.array(
         [[ 0.0, -0.4,  0.0],
          [-0.4,  2.6, -0.4],
          [ 0.0, -0.4,  0.0]],
         dtype=np.float32)
-    processed = cv2.filter2D(enhanced, -1, sharpen_kernel)
+    return cv2.filter2D(enhanced, -1, sharpen_kernel)
 
-    return processed
+
+def capture_and_process(view_matrix, proj_matrix,
+                         external_frame: np.ndarray | None = None) -> np.ndarray:
+    """Convenience wrapper: capture then enhance. Use for display only."""
+    return enhance_frame(capture_frame(view_matrix, proj_matrix, external_frame))
 
 
 # ── Egg mass detection — colour segmentation ──────────────────────────────────

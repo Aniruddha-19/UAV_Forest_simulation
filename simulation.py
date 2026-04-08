@@ -32,8 +32,8 @@ import cv2
 import numpy as np
 import pybullet as p
 
-from camera           import (build_camera_matrices, capture_and_process,
-                               get_camera_vectors)
+from camera           import (build_camera_matrices, capture_frame,
+                               enhance_frame, get_camera_vectors)
 from detector         import detect_egg_masses
 from drone_controller import DroneController
 from environment      import build_scene, init_world, spawn_drone
@@ -139,21 +139,14 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                 # ── Step 5: Camera setup ──────────────────────────────────────
                 drone_pos, drone_orn = controller.pose()
 
-                # Camera always faces forward:
-                #   INSPECT / DESCEND / ASCEND  → look at mid-trunk point
-                #   TRANSIT / HOME              → look horizontally in the
-                #                                 direction of travel
-                if controller.state in (DroneController.DESCEND,
-                                        DroneController.INSPECT,
-                                        DroneController.ASCEND):
-                    tree    = controller.current_tree
-                    look_at = (np.array(controller.trunk_look_at(tree))
-                               if tree else None)
-                else:
-                    fwd     = np.array([math.cos(controller.current_yaw),
-                                        math.sin(controller.current_yaw),
-                                        0.0])
-                    look_at = drone_pos + fwd * 10.0   # 10 m ahead, same altitude
+                # Camera always faces horizontally in the current yaw direction.
+                # During INSPECT, current_yaw already points inward toward the
+                # trunk, so the camera naturally faces the bark at the drone's
+                # altitude without ever tilting down.
+                fwd     = np.array([math.cos(controller.current_yaw),
+                                    math.sin(controller.current_yaw),
+                                    0.0])
+                look_at = drone_pos + fwd * 10.0   # 10 m ahead, same altitude
 
                 cam_fwd, cam_up = get_camera_vectors(
                     drone_orn, drone_pos, look_at)
@@ -170,10 +163,13 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                     if not ret:
                         ext_frame = None             # give up, use renderer
 
-                frame = capture_and_process(view, proj, ext_frame)
+                # Raw frame → RCNN (must match ImageNet pixel distribution)
+                raw_frame  = capture_frame(view, proj, ext_frame)
+                # Enhanced frame → display only (CLAHE + unsharp for visibility)
+                frame      = enhance_frame(raw_frame)
 
                 # ── Step 5b: Faster R-CNN inference (sole detector) ───────────
-                rcnn_boxes = detect_egg_masses(frame)
+                rcnn_boxes = detect_egg_masses(raw_frame)
 
                 if rcnn_boxes:
                     log.log_rcnn_detection(

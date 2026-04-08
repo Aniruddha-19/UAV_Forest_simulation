@@ -54,7 +54,7 @@ _EGG_CLASS = "egg masses"
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def detect_egg_masses(frame_bgr: np.ndarray,
-                      threshold: float = 0.25
+                      threshold: float = 0.10
                       ) -> list[tuple[int, int, int, int]]:
     """
     Run Faster R-CNN on *frame_bgr* (a BGR uint8 numpy array from OpenCV /
@@ -64,7 +64,8 @@ def detect_egg_masses(frame_bgr: np.ndarray,
     Parameters
     ----------
     frame_bgr : H × W × 3 BGR uint8 numpy array
-    threshold : confidence threshold (0.0 – 1.0)
+    threshold : confidence threshold (0.0 – 1.0); lowered to 0.10 to compensate
+                for the sim-to-real domain gap in synthetic PyBullet renders
 
     Returns
     -------
