@@ -94,6 +94,25 @@ def print_banner(config: dict, n_egg_masses: int, log_dir) -> None:
     print("=" * 60)
 
 
+# ── Visibility window & timing limits ────────────────────────────────────────
+# Half-angle (radians) within which an egg mass panel is geometrically in FOV.
+_EM_VIS_HALF_ANGLE = math.radians(30.0)
+
+# Maximum continuous seconds to show one egg mass image per viewing.
+# Once this expires the panel is suppressed even if still inside the angle
+# window (important when orbit slows to 5 °/s on detection — without this
+# cap the same image would stay on screen for ~12 s).
+_EM_MAX_SHOW_SECS = 2.0
+
+# Maximum number of separate viewings of the same panel per orbit.
+# Guards against edge cases where the slow orbit re-enters the FOV window.
+_EM_MAX_VIEWS = 2
+
+# Medium warm-brown shown when the camera faces bare bark — not too dark so
+# the transition from egg-mass image is not a jarring black flash.
+_BARK_FRAME = np.full((IMG_H, IMG_W, 3), (70, 90, 110), dtype=np.uint8)
+
+
 # ── Angle helpers ─────────────────────────────────────────────────────────────
 
 def _angle_diff(a: float, b: float) -> float:
@@ -161,6 +180,13 @@ def run(config_path: str, fps_override: int | None = None) -> None:
 
         physics_step = 0
 
+        # ── Per-orbit egg mass visibility tracking ────────────────────────────
+        # Reset whenever the drone starts inspecting a new tree.
+        _inspect_tree_id: str | None      = None
+        _em_first_seen:   dict[str, float] = {}  # wall time when viewing started
+        _em_view_count:   dict[str, int]   = {}  # # of separate viewings this orbit
+        _em_geo_in_view:  set[str]         = set() # IDs geometrically in FOV last frame
+
         try:
             # ── Main loop ─────────────────────────────────────────────────────
             while not controller.done:
@@ -190,43 +216,83 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                     tree_id  = controller.current_tree["id"]
                     egg_data = tree_egg_data.get(tree_id, [])
 
+                    # Reset tracking when arriving at a new tree
+                    if tree_id != _inspect_tree_id:
+                        _inspect_tree_id = tree_id
+                        _em_first_seen.clear()
+                        _em_view_count.clear()
+                        _em_geo_in_view.clear()
+
                     if egg_data:
-                        # The drone yaw points from the drone TOWARD the trunk,
-                        # so the direction FROM the trunk TOWARD the drone
-                        # (i.e. which face the camera sees) is yaw + π.
+                        # Direction the camera faces (opposite of drone→trunk yaw)
                         facing = controller.current_yaw + math.pi
+                        now    = time.perf_counter()
 
-                        # Pick the egg mass whose bearing from the trunk is
-                        # closest to the drone's current facing direction.
-                        best_idx = min(
-                            range(len(egg_data)),
-                            key=lambda i: abs(_angle_diff(
-                                egg_data[i]["angle"], facing)))
+                        # ── Step A: geometric FOV check ───────────────────────
+                        geo_ids = {
+                            egg_data[i]["id"]
+                            for i in range(len(egg_data))
+                            if abs(_angle_diff(egg_data[i]["angle"], facing))
+                            <= _EM_VIS_HALF_ANGLE
+                        }
 
-                        displayed = egg_data[best_idx]
-                        frame     = (displayed["bgr"]
-                                     if displayed["bgr"] is not None
-                                     else np.zeros((IMG_H, IMG_W, 3),
-                                                   dtype=np.uint8))
+                        # ── Step B: detect FOV entries, update counters ────────
+                        for em_id in geo_ids:
+                            if em_id not in _em_geo_in_view:
+                                # Panel just entered the FOV — new viewing
+                                _em_view_count[em_id] = \
+                                    _em_view_count.get(em_id, 0) + 1
+                                _em_first_seen[em_id] = now
 
-                        # Run R-CNN on every egg mass image for this tree.
-                        # Show boxes only for the currently displayed one.
-                        any_detected = False
-                        rcnn_boxes   = []
-                        for i, em in enumerate(egg_data):
-                            if em["bgr"] is None:
-                                continue
-                            boxes = detect_egg_masses(em["bgr"])
-                            if i == best_idx:
-                                rcnn_boxes = boxes
-                            if boxes:
-                                any_detected = True
+                        _em_geo_in_view = set(geo_ids)   # update for next frame
 
-                        controller.egg_detected = any_detected
+                        # ── Step C: apply time & count limits ─────────────────
+                        # Suppress a panel if it has been shown for more than
+                        # _EM_MAX_SHOW_SECS or has been viewed _EM_MAX_VIEWS
+                        # times this orbit.  This caps viewing even when the
+                        # orbit slows to 5 °/s on detection.
+                        in_view = [
+                            (i, em)
+                            for i, em in enumerate(egg_data)
+                            if em["id"] in geo_ids
+                            and _em_view_count.get(em["id"], 0) <= _EM_MAX_VIEWS
+                            and now - _em_first_seen.get(em["id"], now)
+                                <= _EM_MAX_SHOW_SECS
+                        ]
+
+                        if in_view:
+                            # Display the panel most centred in the frame
+                            best_i, best_em = min(
+                                in_view,
+                                key=lambda t: abs(_angle_diff(
+                                    t[1]["angle"], facing)))
+
+                            frame = (best_em["bgr"]
+                                     if best_em["bgr"] is not None
+                                     else _BARK_FRAME)
+
+                            # R-CNN on every in-view panel; boxes for display one
+                            any_detected = False
+                            rcnn_boxes   = []
+                            for i, em in in_view:
+                                if em["bgr"] is None:
+                                    continue
+                                boxes = detect_egg_masses(em["bgr"])
+                                if i == best_i:
+                                    rcnn_boxes = boxes
+                                if boxes:
+                                    any_detected = True
+
+                            controller.egg_detected = any_detected
+
+                        else:
+                            # Facing bark or panel suppressed — medium bark frame
+                            frame                   = _BARK_FRAME
+                            rcnn_boxes              = []
+                            controller.egg_detected = False
 
                     else:
-                        frame                   = np.zeros(
-                            (IMG_H, IMG_W, 3), dtype=np.uint8)
+                        frame                   = _BARK_FRAME
                         rcnn_boxes              = []
                         controller.egg_detected = False
 
