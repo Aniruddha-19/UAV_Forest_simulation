@@ -23,7 +23,7 @@ from torchvision import transforms as T
 # ── Locate the faster-rcnn-model subdirectory ─────────────────────────────────
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _FRCNN_DIR  = os.path.join(_SCRIPT_DIR, "faster-rcnn-model")
-_MODEL_PATH = os.path.join(_FRCNN_DIR, "outputs", "best_model.pth")
+_MODEL_PATH = os.path.join(_FRCNN_DIR, "outputs", "fasterrcnn.pth")
 
 # Temporarily add to sys.path so model.py / config.py can be imported
 sys.path.insert(0, _FRCNN_DIR)

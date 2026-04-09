@@ -18,14 +18,24 @@ import pybullet_data
 
 # Image textures randomly assigned to egg masses (files sit next to this script).
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_EGG_IMAGES = [
+_ALL_EGG_IMAGES = [
     os.path.join(_SCRIPT_DIR, "1.png"),
     os.path.join(_SCRIPT_DIR, "2.png"),
     os.path.join(_SCRIPT_DIR, "3.png"),
     os.path.join(_SCRIPT_DIR, "6.jpg"),
     os.path.join(_SCRIPT_DIR, "8.jpg"),
+    os.path.join(_SCRIPT_DIR, "7.jpeg"),
     os.path.join(_SCRIPT_DIR, "9.jpg"),
 ]
+# Keep only files that actually exist so random.choice never picks a missing one.
+_EGG_IMAGES = [f for f in _ALL_EGG_IMAGES if os.path.isfile(f)]
+if not _EGG_IMAGES:
+    print("[environment] WARNING: no egg-mass texture images found next to "
+          "environment.py (expected 1.png / 2.png / 3.png / 6.jpg / 8.jpg / 9.jpg). "
+          "Egg masses will render as plain yellow panels.")
+else:
+    print(f"[environment] Loaded {len(_EGG_IMAGES)} egg-mass texture(s): "
+          + ", ".join(os.path.basename(f) for f in _EGG_IMAGES))
 
 
 # ── World initialisation ──────────────────────────────────────────────────────
@@ -227,7 +237,7 @@ def build_scene(config: dict) -> list[dict]:
         )
         trunk_pos = tree_cfg["position"]
         for em in tree_cfg.get("egg_masses", []):
-            img_path = random.choice(_EGG_IMAGES)     # random image per egg mass
+            img_path = random.choice(_EGG_IMAGES) if _EGG_IMAGES else None
             body = spawn_egg_mass(
                 position       = em["position"],
                 trunk_position = trunk_pos,

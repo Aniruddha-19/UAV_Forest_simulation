@@ -139,14 +139,23 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                 # ── Step 5: Camera setup ──────────────────────────────────────
                 drone_pos, drone_orn = controller.pose()
 
-                # Camera always faces horizontally in the current yaw direction.
-                # During INSPECT, current_yaw already points inward toward the
-                # trunk, so the camera naturally faces the bark at the drone's
-                # altitude without ever tilting down.
-                fwd     = np.array([math.cos(controller.current_yaw),
-                                    math.sin(controller.current_yaw),
-                                    0.0])
-                look_at = drone_pos + fwd * 10.0   # 10 m ahead, same altitude
+                fwd = np.array([math.cos(controller.current_yaw),
+                                math.sin(controller.current_yaw),
+                                0.0])
+
+                # During INSPECT the drone orbits at inspect_alt (2 m) while
+                # egg masses sit at 0.4–1.8 m.  A horizontal look_at puts the
+                # bottom of the 60° frame at ~1.16 m, hiding all lower panels.
+                # Instead aim at the trunk face at mid-egg-mass height (1.0 m)
+                # which tilts the camera ~34° down and brings all panels into
+                # the frame (covering 0 – 1.9 m at the trunk face distance).
+                if (controller.state == DroneController.INSPECT
+                        and controller.current_tree is not None):
+                    look_at = np.array(
+                        controller.trunk_look_at(controller.current_tree),
+                        dtype=float)
+                else:
+                    look_at = drone_pos + fwd * 10.0   # horizontal during transit
 
                 cam_fwd, cam_up = get_camera_vectors(
                     drone_orn, drone_pos, look_at)
@@ -168,8 +177,22 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                 # Enhanced frame → display only (CLAHE + unsharp for visibility)
                 frame      = enhance_frame(raw_frame)
 
-                # ── Step 5b: Faster R-CNN inference (sole detector) ───────────
-                rcnn_boxes = detect_egg_masses(raw_frame)
+                # ── Step 5b: Faster R-CNN inference (INSPECT only) ───────────
+                # During TRANSIT / DESCEND / ASCEND / HOME the camera looks
+                # horizontally at cruise altitude and captures open sky —
+                # running the model there produces sky false-positives.
+                if controller.state == DroneController.INSPECT:
+                    rcnn_boxes = detect_egg_masses(raw_frame)
+                    # Secondary sky filter: discard boxes whose vertical centre
+                    # falls in the top 10 % of the frame.  With the camera now
+                    # tilted ~34° down toward the trunk, sky occupies only the
+                    # narrow top strip (above ~1.9 m at trunk distance); egg
+                    # masses on the bark appear from the top third downward.
+                    _sky_cutoff = int(0.10 * raw_frame.shape[0])
+                    rcnn_boxes = [b for b in rcnn_boxes
+                                  if (b[1] + b[3]) // 2 > _sky_cutoff]
+                else:
+                    rcnn_boxes = []
 
                 if rcnn_boxes:
                     log.log_rcnn_detection(
