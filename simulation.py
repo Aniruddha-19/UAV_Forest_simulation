@@ -8,9 +8,25 @@ Module responsibilities
 -----------------------
   environment.py      — PyBullet world setup, spawning trees / egg masses / drone
   drone_controller.py — TRANSIT → INSPECT → HOME state machine
-  camera.py           — frame capture, image processing, egg mass detection
+  camera.py           — frame capture, image processing constants
   visualizer.py       — HUD annotation and OpenCV display
   logger.py           — CSV log, frame saving, console heartbeat
+
+Camera / detection split
+------------------------
+  TRANSIT / DESCEND / ASCEND / HOME
+      PyBullet getCameraImage() renders the 3D scene so the operator can
+      watch the drone fly.  No R-CNN inference is run.
+
+  INSPECT
+      getCameraImage() is skipped entirely.  Instead, the real bug-photo
+      assigned to the egg mass the drone is currently facing is passed
+      directly to Faster R-CNN.  As the drone orbits, whichever egg mass
+      is closest to the camera's forward direction is displayed and
+      detected; the image automatically switches as the drone passes each
+      panel position.  R-CNN is also run on every other egg mass image for
+      the tree so egg_detected is True even if the drone hasn't reached
+      a panel yet.
 
 Usage
 -----
@@ -32,7 +48,8 @@ import cv2
 import numpy as np
 import pybullet as p
 
-from camera           import (build_camera_matrices, capture_frame,
+from camera           import (IMG_W, IMG_H,
+                               build_camera_matrices, capture_frame,
                                enhance_frame, get_camera_vectors)
 from detector         import detect_egg_masses
 from drone_controller import DroneController
@@ -55,10 +72,10 @@ def load_config(config_path: str, fps_override: int | None = None) -> dict:
 # ── Startup banner ────────────────────────────────────────────────────────────
 
 def print_banner(config: dict, n_egg_masses: int, log_dir) -> None:
-    orbit_spd    = config["drone"].get("inspect_orbit_speed_deg", 20)
-    orbit_r      = config["drone"].get("inspect_radius", 3.0)
-    trunk_clr    = config["drone"].get("inspect_trunk_clearance", 1.0)
-    inspect_alt  = config["drone"].get("inspect_altitude", 2.0)
+    orbit_spd   = config["drone"].get("inspect_orbit_speed_deg", 20)
+    orbit_r     = config["drone"].get("inspect_radius", 3.0)
+    trunk_clr   = config["drone"].get("inspect_trunk_clearance", 1.0)
+    inspect_alt = config["drone"].get("inspect_altitude", 2.0)
     print("=" * 60)
     print("  UAV Tree Inspection Simulation")
     print("=" * 60)
@@ -67,14 +84,21 @@ def print_banner(config: dict, n_egg_masses: int, log_dir) -> None:
     print(f"  Transit speed  : {config['drone']['transit_speed']} m/s")
     print(f"  Cruise alt     : {config['drone']['cruise_altitude']} m")
     print(f"  Inspect alt    : {inspect_alt} m  (trunk level)")
-    print(f"  Canopy radius  : {orbit_r} m  (clearance beyond canopy during transit)")
-    print(f"  Trunk clearance: {trunk_clr} m  (orbit radius = trunk_r + {trunk_clr} m at inspect alt)")
+    print(f"  Canopy radius  : {orbit_r} m  (clearance beyond canopy)")
+    print(f"  Trunk clearance: {trunk_clr} m  (orbit radius = trunk_r + {trunk_clr} m)")
     print(f"  Orbit speed    : {orbit_spd} °/s  "
           f"(360° ≈ {360 / orbit_spd:.0f} s / tree)")
     print(f"  Capture FPS    : {config['drone']['capture_fps']}")
     print(f"  Logs           : {log_dir}")
     print("  Press 'q' in the camera window to quit.")
     print("=" * 60)
+
+
+# ── Angle helpers ─────────────────────────────────────────────────────────────
+
+def _angle_diff(a: float, b: float) -> float:
+    """Smallest signed angular difference a − b, wrapped to (−π, π]."""
+    return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
 # ── Main simulation loop ──────────────────────────────────────────────────────
@@ -88,25 +112,47 @@ def run(config_path: str, fps_override: int | None = None) -> None:
 
     # ── Step 1: Initialise world & build scene ────────────────────────────────
     init_world(config)
-    build_scene(config)                                    # spawn trees + eggs
-    drone_id   = spawn_drone(config["drone"]["start_position"])
+    egg_masses_data = build_scene(config)          # each entry has tree_id + image_path
+    drone_id        = spawn_drone(config["drone"]["start_position"])
 
     # ── Step 2: Initialise drone controller ───────────────────────────────────
     controller = DroneController(drone_id, config, config["trees"])
 
-    # ── Step 3: Optional external camera source ───────────────────────────────
-    # Set "camera_source" in config to a device index (0, 1, …) or a video
-    # file path.  When set, frames come from that source instead of PyBullet.
-    _cam_src = config["drone"].get("camera_source", None)
-    _cap     = None
-    if _cam_src is not None:
-        _cap = cv2.VideoCapture(_cam_src)
-        if _cap.isOpened():
-            print(f"[camera] External source opened: {_cam_src!r}")
-        else:
-            print(f"[WARNING] Cannot open camera_source={_cam_src!r}, "
-                  "falling back to PyBullet renderer.")
-            _cap = None
+    # ── Step 3: Preload egg mass images & compute facing angles ───────────────
+    # For each egg mass, record:
+    #   angle — the bearing from the trunk centre to the egg mass panel
+    #           (used to pick which image to show based on where drone faces)
+    #   bgr   — the real bug photo resized to IMG_W × IMG_H, ready for R-CNN
+    #
+    # Images are read once at startup; no disk I/O inside the main loop.
+    trunk_pos_map = {t["id"]: t["position"] for t in config["trees"]}
+
+    # tree_egg_data[tree_id] = list of {angle, bgr, id} dicts, one per egg mass
+    tree_egg_data: dict[str, list[dict]] = {}
+    for em in egg_masses_data:
+        tp    = trunk_pos_map[em["tree_id"]]
+        ex, ey = em["position"][0], em["position"][1]
+        angle  = math.atan2(ey - tp[1], ex - tp[0])  # bearing from trunk to panel
+
+        bgr = None
+        path = em.get("image_path")
+        if path:
+            raw = cv2.imread(path)
+            if raw is not None:
+                bgr = cv2.resize(raw, (IMG_W, IMG_H))
+            else:
+                print(f"[WARNING] Cannot load egg mass image: {path}")
+
+        tree_egg_data.setdefault(em["tree_id"], []).append({
+            "id":    em["id"],
+            "angle": angle,
+            "bgr":   bgr,
+        })
+
+    loaded = sum(1 for ems in tree_egg_data.values()
+                 for em in ems if em["bgr"] is not None)
+    print(f"[sim] Preloaded {loaded} egg-mass image(s) across "
+          f"{len(tree_egg_data)} tree(s).")
 
     # ── Step 4: Open logger ───────────────────────────────────────────────────
     with SimulationLogger() as log:
@@ -119,9 +165,6 @@ def run(config_path: str, fps_override: int | None = None) -> None:
             # ── Main loop ─────────────────────────────────────────────────────
             while not controller.done:
 
-                # Deadline for this step — caps simulation at 1× real time.
-                # Steps that include R-CNN inference naturally exceed dt;
-                # the sleep is simply skipped so there is no accumulating lag.
                 _step_deadline = time.perf_counter() + dt
 
                 # Advance drone + physics
@@ -129,88 +172,93 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                 p.stepSimulation()
                 physics_step += 1
 
-                # Only process camera every N physics steps
+                # Only run detection / display every N physics steps
                 if physics_step % steps_per_frame != 0:
                     _remaining = _step_deadline - time.perf_counter()
                     if _remaining > 0:
                         time.sleep(_remaining)
                     continue
 
-                # ── Step 5: Camera setup ──────────────────────────────────────
+                # ── Step 5: Drone pose ────────────────────────────────────────
                 drone_pos, drone_orn = controller.pose()
 
-                fwd = np.array([math.cos(controller.current_yaw),
-                                math.sin(controller.current_yaw),
-                                0.0])
-
-                # During INSPECT the drone orbits at inspect_alt (2 m) while
-                # egg masses sit at 0.4–1.8 m.  A horizontal look_at puts the
-                # bottom of the 60° frame at ~1.16 m, hiding all lower panels.
-                # Instead aim at the trunk face at mid-egg-mass height (1.0 m)
-                # which tilts the camera ~34° down and brings all panels into
-                # the frame (covering 0 – 1.9 m at the trunk face distance).
+                # ── Step 6: Frame + detection ─────────────────────────────────
                 if (controller.state == DroneController.INSPECT
                         and controller.current_tree is not None):
-                    look_at = np.array(
-                        controller.trunk_look_at(controller.current_tree),
-                        dtype=float)
+
+                    # ── INSPECT: real images → R-CNN, no 3D rendering ─────────
+                    tree_id  = controller.current_tree["id"]
+                    egg_data = tree_egg_data.get(tree_id, [])
+
+                    if egg_data:
+                        # The drone yaw points from the drone TOWARD the trunk,
+                        # so the direction FROM the trunk TOWARD the drone
+                        # (i.e. which face the camera sees) is yaw + π.
+                        facing = controller.current_yaw + math.pi
+
+                        # Pick the egg mass whose bearing from the trunk is
+                        # closest to the drone's current facing direction.
+                        best_idx = min(
+                            range(len(egg_data)),
+                            key=lambda i: abs(_angle_diff(
+                                egg_data[i]["angle"], facing)))
+
+                        displayed = egg_data[best_idx]
+                        frame     = (displayed["bgr"]
+                                     if displayed["bgr"] is not None
+                                     else np.zeros((IMG_H, IMG_W, 3),
+                                                   dtype=np.uint8))
+
+                        # Run R-CNN on every egg mass image for this tree.
+                        # Show boxes only for the currently displayed one.
+                        any_detected = False
+                        rcnn_boxes   = []
+                        for i, em in enumerate(egg_data):
+                            if em["bgr"] is None:
+                                continue
+                            boxes = detect_egg_masses(em["bgr"])
+                            if i == best_idx:
+                                rcnn_boxes = boxes
+                            if boxes:
+                                any_detected = True
+
+                        controller.egg_detected = any_detected
+
+                    else:
+                        frame                   = np.zeros(
+                            (IMG_H, IMG_W, 3), dtype=np.uint8)
+                        rcnn_boxes              = []
+                        controller.egg_detected = False
+
                 else:
-                    look_at = drone_pos + fwd * 10.0   # horizontal during transit
+                    # ── TRANSIT / DESCEND / ASCEND / HOME: 3D camera ──────────
+                    fwd = np.array([math.cos(controller.current_yaw),
+                                    math.sin(controller.current_yaw),
+                                    0.0])
+                    look_at = drone_pos + fwd * 10.0   # horizontal, 10 m ahead
 
-                cam_fwd, cam_up = get_camera_vectors(
-                    drone_orn, drone_pos, look_at)
-                view, proj = build_camera_matrices(drone_pos, cam_fwd, cam_up)
+                    cam_fwd, cam_up = get_camera_vectors(
+                        drone_orn, drone_pos, look_at)
+                    view, proj = build_camera_matrices(
+                        drone_pos, cam_fwd, cam_up)
 
-                # ── Step 6: Capture + process frame ───────────────────────────
-                # Read from external camera if configured; fall back to renderer.
-                ext_frame = None
-                if _cap is not None:
-                    ret, ext_frame = _cap.read()
-                    if not ret:                      # loop when video file ends
-                        _cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        ret, ext_frame = _cap.read()
-                    if not ret:
-                        ext_frame = None             # give up, use renderer
+                    raw_frame = capture_frame(view, proj)
+                    frame     = enhance_frame(raw_frame)
 
-                # Raw frame → RCNN (must match ImageNet pixel distribution)
-                raw_frame  = capture_frame(view, proj, ext_frame)
-                # Enhanced frame → display only (CLAHE + unsharp for visibility)
-                frame      = enhance_frame(raw_frame)
-
-                # ── Step 5b: Faster R-CNN inference (INSPECT only) ───────────
-                # During TRANSIT / DESCEND / ASCEND / HOME the camera looks
-                # horizontally at cruise altitude and captures open sky —
-                # running the model there produces sky false-positives.
-                if controller.state == DroneController.INSPECT:
-                    rcnn_boxes = detect_egg_masses(raw_frame)
-                    # Secondary sky filter: discard boxes whose vertical centre
-                    # falls in the top 10 % of the frame.  With the camera now
-                    # tilted ~34° down toward the trunk, sky occupies only the
-                    # narrow top strip (above ~1.9 m at trunk distance); egg
-                    # masses on the bark appear from the top third downward.
-                    _sky_cutoff = int(0.10 * raw_frame.shape[0])
-                    rcnn_boxes = [b for b in rcnn_boxes
-                                  if (b[1] + b[3]) // 2 > _sky_cutoff]
-                else:
-                    rcnn_boxes = []
+                    rcnn_boxes              = []
+                    controller.egg_detected = False
 
                 if rcnn_boxes:
                     log.log_rcnn_detection(
                         len(rcnn_boxes), drone_pos, controller.state)
 
-                # R-CNN result drives both orbit-speed and approach behaviour:
-                #   detected  → slow orbit, hold current radius
-                #   not found → normal orbit speed, shrink radius toward trunk
-                controller.egg_detected = bool(rcnn_boxes)
-
-                # ── Step 6: Annotate frame ────────────────────────────────────
-                tree        = controller.current_tree
-                tree_label  = tree["id"] if tree else "—"
-                tree_idx    = min(controller.tree_idx + 1,
-                                  len(config["trees"]))
-                orbit_pct   = (controller.orbit_progress
-                               if controller.state == DroneController.INSPECT
-                               else 0.0)
+                # ── Step 7: Annotate frame ────────────────────────────────────
+                tree       = controller.current_tree
+                tree_label = tree["id"] if tree else "—"
+                tree_idx   = min(controller.tree_idx + 1, len(config["trees"]))
+                orbit_pct  = (controller.orbit_progress
+                              if controller.state == DroneController.INSPECT
+                              else 0.0)
 
                 annotated = annotate(
                     frame        = frame,
@@ -227,11 +275,11 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                     fps          = capture_fps,
                 )
 
-                # ── Step 7: Save frame when R-CNN detects egg mass ────────────
+                # ── Step 8: Save frame when R-CNN detects egg mass ────────────
                 if rcnn_boxes:
                     log.save_frame(annotated)
 
-                # ── Step 8: Display + heartbeat ───────────────────────────────
+                # ── Step 9: Display + heartbeat ───────────────────────────────
                 if show(annotated):
                     print("\nStopped by user (q).")
                     break
@@ -242,8 +290,6 @@ def run(config_path: str, fps_override: int | None = None) -> None:
 
                 log.tick_frame()
 
-                # Pace camera steps to real-time (R-CNN inference may already
-                # have consumed more than dt, in which case we skip the sleep)
                 _remaining = _step_deadline - time.perf_counter()
                 if _remaining > 0:
                     time.sleep(_remaining)
@@ -252,8 +298,6 @@ def run(config_path: str, fps_override: int | None = None) -> None:
             print("\nInterrupted (Ctrl-C).")
 
         finally:
-            if _cap is not None:
-                _cap.release()
             close_windows()
             p.disconnect()
             log.print_summary()

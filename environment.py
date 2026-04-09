@@ -11,7 +11,6 @@ the caller can reference them later (e.g. for collision filtering).
 
 import math
 import os
-import random
 
 import pybullet as p
 import pybullet_data
@@ -223,11 +222,14 @@ def build_scene(config: dict) -> list[dict]:
     Returns
     -------
     egg_masses : list of dicts, each with keys:
-        'id'       – label string from config
-        'position' – [x, y, z] world position
-        'body'     – PyBullet body ID of the egg mass panel
+        'id'         – label string from config
+        'tree_id'    – id of the parent tree
+        'position'   – [x, y, z] world position
+        'body'       – PyBullet body ID of the egg mass panel
+        'image_path' – absolute path to the assigned bug image (may be None)
     """
     egg_masses: list[dict] = []
+    _img_idx = 0   # cycles sequentially through _EGG_IMAGES across all egg masses
 
     for tree_cfg in config["trees"]:
         spawn_tree(
@@ -237,16 +239,20 @@ def build_scene(config: dict) -> list[dict]:
         )
         trunk_pos = tree_cfg["position"]
         for em in tree_cfg.get("egg_masses", []):
-            img_path = random.choice(_EGG_IMAGES) if _EGG_IMAGES else None
+            img_path = (_EGG_IMAGES[_img_idx % len(_EGG_IMAGES)]
+                        if _EGG_IMAGES else None)
+            _img_idx += 1
             body = spawn_egg_mass(
                 position       = em["position"],
                 trunk_position = trunk_pos,
                 image_path     = img_path,
             )
             egg_masses.append({
-                "id":       em["id"],
-                "position": em["position"],
-                "body":     body,
+                "id":         em["id"],
+                "tree_id":    tree_cfg["id"],
+                "position":   em["position"],
+                "body":       body,
+                "image_path": img_path,
             })
 
     return egg_masses
