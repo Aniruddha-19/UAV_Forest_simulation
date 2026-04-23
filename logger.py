@@ -127,14 +127,15 @@ class SimulationLogger:
 
     def print_heartbeat(self,
                          drone_pos,
-                         state:      str,
-                         tree_label: str,
-                         n_rcnn:     int,
-                         capture_fps: int) -> None:
+                         state:       str,
+                         tree_label:  str,
+                         n_rcnn:      int,
+                         inference_fps: float) -> None:
         """
-        Print a one-line status update every 5 seconds of rendered time.
+        Print a one-line status update every 5 seconds of inferred time.
         """
-        if self.frame_no % (capture_fps * 5) != 0:
+        interval = max(1, round(inference_fps * 5))
+        if self.frame_no % interval != 0:
             return
         print(
             f"  t={self.elapsed:6.1f}s | f={self.frame_no:5d} |"
@@ -144,18 +145,21 @@ class SimulationLogger:
             f" | rcnn={n_rcnn}"
         )
 
-    def print_summary(self) -> None:
+    def print_summary(self, missed_frames: int = 0, sim_time: float = 0.0) -> None:
         """Print the end-of-run summary table."""
-        elapsed = self.elapsed
-        mins, secs = divmod(int(elapsed), 60)
+        mins, secs = divmod(int(sim_time), 60)
+        total_cam = self.frame_no + missed_frames
+        miss_pct  = (missed_frames / total_cam * 100) if total_cam > 0 else 0.0
         print("\n" + "=" * 60)
         print("  Simulation complete")
         print("=" * 60)
-        print(f"  Total run time : {mins}m {secs:02d}s  ({elapsed:.1f} s)")
-        print(f"  Frames total   : {self.frame_no}")
-        print(f"  Frames saved   : {self.saved_no}  (RCNN detections only)")
-        print(f"  Frames dir     : {self.frames_dir.resolve()}")
-        print(f"  Detection log  : {self.csv_path.resolve()}")
+        print(f"  Simulation time : {mins}m {secs:02d}s  ({sim_time:.1f} s)")
+        print(f"  Camera frames   : {total_cam}  (captured by sensor)")
+        print(f"  Inferred frames : {self.frame_no}  (processed by model)")
+        print(f"  Missed frames   : {missed_frames}  ({miss_pct:.1f}% dropped)")
+        print(f"  Frames saved    : {self.saved_no}  (RCNN detections only)")
+        print(f"  Frames dir      : {self.frames_dir.resolve()}")
+        print(f"  Detection log   : {self.csv_path.resolve()}")
         print("=" * 60)
 
     # ── Properties ────────────────────────────────────────────────────────────

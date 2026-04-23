@@ -9,32 +9,26 @@ All functions return the PyBullet body ID(s) of the created objects so
 the caller can reference them later (e.g. for collision filtering).
 """
 
+import glob
 import math
 import os
 
 import pybullet as p
 import pybullet_data
 
-# Image textures randomly assigned to egg masses (files sit next to this script).
+# Image textures randomly assigned to egg masses — all images from simulation_test_data/.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_ALL_EGG_IMAGES = [
-    os.path.join(_SCRIPT_DIR, "1.png"),
-    os.path.join(_SCRIPT_DIR, "2.png"),
-    os.path.join(_SCRIPT_DIR, "3.png"),
-    os.path.join(_SCRIPT_DIR, "6.jpg"),
-    os.path.join(_SCRIPT_DIR, "8.jpg"),
-    os.path.join(_SCRIPT_DIR, "7.jpeg"),
-    os.path.join(_SCRIPT_DIR, "9.jpg"),
-]
-# Keep only files that actually exist so random.choice never picks a missing one.
-_EGG_IMAGES = [f for f in _ALL_EGG_IMAGES if os.path.isfile(f)]
+_TEST_DATA_DIR = os.path.join(_SCRIPT_DIR, "simulation_test_data")
+_EGG_IMAGES = sorted(
+    f for ext in ("*.png", "*.jpg", "*.jpeg")
+    for f in glob.glob(os.path.join(_TEST_DATA_DIR, ext))
+)
 if not _EGG_IMAGES:
-    print("[environment] WARNING: no egg-mass texture images found next to "
-          "environment.py (expected 1.png / 2.png / 3.png / 6.jpg / 8.jpg / 9.jpg). "
-          "Egg masses will render as plain yellow panels.")
+    print("[environment] WARNING: no egg-mass texture images found in "
+          "simulation_test_data/. Egg masses will render as plain yellow panels.")
 else:
-    print(f"[environment] Loaded {len(_EGG_IMAGES)} egg-mass texture(s): "
-          + ", ".join(os.path.basename(f) for f in _EGG_IMAGES))
+    print(f"[environment] Loaded {len(_EGG_IMAGES)} egg-mass texture(s) "
+          f"from simulation_test_data/")
 
 
 # ── World initialisation ──────────────────────────────────────────────────────
@@ -215,9 +209,9 @@ def build_scene(config: dict) -> list[dict]:
     """
     Spawn all trees and their egg masses from the config.
 
-    Egg mass images cycle through 1.png → 2.png → 3.png → 1.png … across
-    every egg mass in the scene.  Each panel is oriented to face outward from
-    its parent trunk axis.
+    Egg mass images cycle sequentially through all images in simulation_test_data/
+    across every egg mass in the scene.  Each panel is oriented to face outward
+    from its parent trunk axis.
 
     Returns
     -------

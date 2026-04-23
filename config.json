@@ -130,7 +130,8 @@
     "inspect_min_clearance": 0.5,
     "inspect_approach_speed": 0.05,
     "camera_source": null,
-    "capture_fps": 1.7
+    "camera_fps": 30,
+    "inference_fps": 1.7
   },
 
   "simulation": {

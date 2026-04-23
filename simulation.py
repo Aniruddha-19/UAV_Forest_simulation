@@ -61,11 +61,11 @@ from visualizer       import annotate, close_windows, show
 # ── Configuration loader ──────────────────────────────────────────────────────
 
 def load_config(config_path: str, fps_override: int | None = None) -> dict:
-    """Load config.json and optionally override the capture frame rate."""
+    """Load config.json and optionally override the inference frame rate."""
     with open(config_path) as f:
         config = json.load(f)
     if fps_override is not None:
-        config["drone"]["capture_fps"] = fps_override
+        config["drone"]["inference_fps"] = fps_override
     return config
 
 
@@ -88,7 +88,8 @@ def print_banner(config: dict, n_egg_masses: int, log_dir) -> None:
     print(f"  Trunk clearance: {trunk_clr} m  (orbit radius = trunk_r + {trunk_clr} m)")
     print(f"  Orbit speed    : {orbit_spd} °/s  "
           f"(360° ≈ {360 / orbit_spd:.0f} s / tree)")
-    print(f"  Capture FPS    : {config['drone']['capture_fps']}")
+    print(f"  Camera FPS     : {config['drone'].get('camera_fps', 30)}")
+    print(f"  Inference FPS  : {config['drone']['inference_fps']}")
     print(f"  Logs           : {log_dir}")
     print("  Press 'q' in the camera window to quit.")
     print("=" * 60)
@@ -125,9 +126,11 @@ def _angle_diff(a: float, b: float) -> float:
 def run(config_path: str, fps_override: int | None = None) -> None:
     config = load_config(config_path, fps_override)
 
-    capture_fps     = config["drone"]["capture_fps"]
-    dt              = config["simulation"]["time_step"]
-    steps_per_frame = max(1, round(1.0 / (capture_fps * dt)))
+    camera_fps         = config["drone"].get("camera_fps", 30)
+    inference_fps      = config["drone"]["inference_fps"]
+    dt                 = config["simulation"]["time_step"]
+    camera_interval    = max(1, round(1.0 / (camera_fps    * dt)))
+    inference_interval = max(1, round(1.0 / (inference_fps * dt)))
 
     # ── Step 1: Initialise world & build scene ────────────────────────────────
     init_world(config)
@@ -181,11 +184,22 @@ def run(config_path: str, fps_override: int | None = None) -> None:
         physics_step = 0
 
         # ── Per-orbit egg mass visibility tracking ────────────────────────────
-        # Reset whenever the drone starts inspecting a new tree.
-        _inspect_tree_id: str | None      = None
-        _em_first_seen:   dict[str, float] = {}  # wall time when viewing started
-        _em_view_count:   dict[str, int]   = {}  # # of separate viewings this orbit
-        _em_geo_in_view:  set[str]         = set() # IDs geometrically in FOV last frame
+        # Tracking only advances at inference steps — the model never "saw"
+        # the frames that were missed while it was busy.
+        _inspect_tree_id: str | None       = None
+        _em_first_seen:   dict[str, float] = {}
+        _em_view_count:   dict[str, int]   = {}
+        _em_geo_in_view:  set[str]         = set()
+
+        # ── Camera / inference split state ────────────────────────────────────
+        # latest_* is written at every camera step and read at inference steps.
+        latest_frame      : np.ndarray  = _BARK_FRAME
+        latest_geo_ids    : set[str]    = set()
+        latest_facing     : float       = 0.0
+        latest_is_inspect : bool        = False
+
+        cam_frames_since_infer: int = 0   # camera frames since last inference
+        total_missed_frames   : int = 0   # cumulative dropped frames
 
         try:
             # ── Main loop ─────────────────────────────────────────────────────
@@ -193,87 +207,114 @@ def run(config_path: str, fps_override: int | None = None) -> None:
 
                 _step_deadline = time.perf_counter() + dt
 
-                # Advance drone + physics
                 controller.step()
                 p.stepSimulation()
                 physics_step += 1
 
-                # Only run detection / display every N physics steps
-                if physics_step % steps_per_frame != 0:
-                    _remaining = _step_deadline - time.perf_counter()
-                    if _remaining > 0:
-                        time.sleep(_remaining)
-                    continue
+                # ── Camera step: capture latest frame (no inference) ──────────
+                if physics_step % camera_interval == 0:
+                    cam_frames_since_infer += 1
+                    _cam_pos, _cam_orn = controller.pose()
 
-                # ── Step 5: Drone pose ────────────────────────────────────────
-                drone_pos, drone_orn = controller.pose()
+                    if (controller.state == DroneController.INSPECT
+                            and controller.current_tree is not None):
 
-                # ── Step 6: Frame + detection ─────────────────────────────────
-                if (controller.state == DroneController.INSPECT
-                        and controller.current_tree is not None):
+                        tree_id  = controller.current_tree["id"]
+                        egg_data = tree_egg_data.get(tree_id, [])
 
-                    # ── INSPECT: real images → R-CNN, no 3D rendering ─────────
-                    tree_id  = controller.current_tree["id"]
-                    egg_data = tree_egg_data.get(tree_id, [])
+                        if tree_id != _inspect_tree_id:
+                            _inspect_tree_id = tree_id
+                            _em_first_seen.clear()
+                            _em_view_count.clear()
+                            _em_geo_in_view.clear()
+                            latest_geo_ids = set()
 
-                    # Reset tracking when arriving at a new tree
-                    if tree_id != _inspect_tree_id:
-                        _inspect_tree_id = tree_id
-                        _em_first_seen.clear()
-                        _em_view_count.clear()
-                        _em_geo_in_view.clear()
+                        facing             = controller.current_yaw + math.pi
+                        latest_facing      = facing
+                        latest_is_inspect  = True
 
-                    if egg_data:
-                        # Direction the camera faces (opposite of drone→trunk yaw)
-                        facing = controller.current_yaw + math.pi
-                        now    = time.perf_counter()
+                        if egg_data:
+                            geo_ids = {
+                                egg_data[i]["id"]
+                                for i in range(len(egg_data))
+                                if abs(_angle_diff(egg_data[i]["angle"], facing))
+                                <= _EM_VIS_HALF_ANGLE
+                            }
+                            latest_geo_ids = geo_ids
+                            if geo_ids:
+                                best_em = min(
+                                    (em for em in egg_data
+                                     if em["id"] in geo_ids),
+                                    key=lambda em: abs(
+                                        _angle_diff(em["angle"], facing)))
+                                latest_frame = (best_em["bgr"]
+                                                if best_em["bgr"] is not None
+                                                else _BARK_FRAME)
+                            else:
+                                latest_frame   = _BARK_FRAME
+                                latest_geo_ids = set()
+                        else:
+                            latest_frame   = _BARK_FRAME
+                            latest_geo_ids = set()
 
-                        # ── Step A: geometric FOV check ───────────────────────
-                        geo_ids = {
-                            egg_data[i]["id"]
-                            for i in range(len(egg_data))
-                            if abs(_angle_diff(egg_data[i]["angle"], facing))
-                            <= _EM_VIS_HALF_ANGLE
-                        }
+                    else:
+                        latest_is_inspect = False
+                        fwd     = np.array([math.cos(controller.current_yaw),
+                                            math.sin(controller.current_yaw),
+                                            0.0])
+                        look_at = _cam_pos + fwd * 10.0
+                        cam_fwd, cam_up = get_camera_vectors(
+                            _cam_orn, _cam_pos, look_at)
+                        view, proj   = build_camera_matrices(
+                            _cam_pos, cam_fwd, cam_up)
+                        latest_frame = enhance_frame(capture_frame(view, proj))
+                        latest_geo_ids = set()
 
-                        # ── Step B: detect FOV entries, update counters ────────
-                        for em_id in geo_ids:
+                # ── Inference step: R-CNN on the latest captured frame ─────────
+                if physics_step % inference_interval == 0:
+                    # Frames captured since last inference that weren't processed
+                    missed = max(0, cam_frames_since_infer - 1)
+                    total_missed_frames    += missed
+                    cam_frames_since_infer  = 0
+
+                    drone_pos, _ = controller.pose()
+                    rcnn_boxes   = []
+
+                    if (latest_is_inspect
+                            and controller.state == DroneController.INSPECT
+                            and controller.current_tree is not None
+                            and controller.current_tree["id"] == _inspect_tree_id):
+
+                        egg_data = tree_egg_data.get(_inspect_tree_id, [])
+                        now      = time.perf_counter()
+
+                        # Step B: detect panel FOV entries at inference granularity.
+                        # Panels visible only during missed frames are never counted —
+                        # the model never processed those frames.
+                        for em_id in latest_geo_ids:
                             if em_id not in _em_geo_in_view:
-                                # Panel just entered the FOV — new viewing
                                 _em_view_count[em_id] = \
                                     _em_view_count.get(em_id, 0) + 1
                                 _em_first_seen[em_id] = now
+                        _em_geo_in_view = set(latest_geo_ids)
 
-                        _em_geo_in_view = set(geo_ids)   # update for next frame
-
-                        # ── Step C: apply time & count limits ─────────────────
-                        # Suppress a panel if it has been shown for more than
-                        # _EM_MAX_SHOW_SECS or has been viewed _EM_MAX_VIEWS
-                        # times this orbit.  This caps viewing even when the
-                        # orbit slows to 5 °/s on detection.
+                        # Step C: apply time & count limits
                         in_view = [
                             (i, em)
                             for i, em in enumerate(egg_data)
-                            if em["id"] in geo_ids
+                            if em["id"] in latest_geo_ids
                             and _em_view_count.get(em["id"], 0) <= _EM_MAX_VIEWS
                             and now - _em_first_seen.get(em["id"], now)
                                 <= _EM_MAX_SHOW_SECS
                         ]
 
+                        any_detected = False
                         if in_view:
-                            # Display the panel most centred in the frame
-                            best_i, best_em = min(
+                            best_i = min(
                                 in_view,
-                                key=lambda t: abs(_angle_diff(
-                                    t[1]["angle"], facing)))
-
-                            frame = (best_em["bgr"]
-                                     if best_em["bgr"] is not None
-                                     else _BARK_FRAME)
-
-                            # R-CNN on every in-view panel; boxes for display one
-                            any_detected = False
-                            rcnn_boxes   = []
+                                key=lambda t: abs(
+                                    _angle_diff(t[1]["angle"], latest_facing))
+                            )[0]
                             for i, em in in_view:
                                 if em["bgr"] is None:
                                     continue
@@ -283,78 +324,51 @@ def run(config_path: str, fps_override: int | None = None) -> None:
                                 if boxes:
                                     any_detected = True
 
-                            controller.egg_detected = any_detected
-
-                        else:
-                            # Facing bark or panel suppressed — medium bark frame
-                            frame                   = _BARK_FRAME
-                            rcnn_boxes              = []
-                            controller.egg_detected = False
+                        controller.egg_detected = any_detected
 
                     else:
-                        frame                   = _BARK_FRAME
-                        rcnn_boxes              = []
                         controller.egg_detected = False
 
-                else:
-                    # ── TRANSIT / DESCEND / ASCEND / HOME: 3D camera ──────────
-                    fwd = np.array([math.cos(controller.current_yaw),
-                                    math.sin(controller.current_yaw),
-                                    0.0])
-                    look_at = drone_pos + fwd * 10.0   # horizontal, 10 m ahead
+                    if rcnn_boxes:
+                        log.log_rcnn_detection(
+                            len(rcnn_boxes), drone_pos, controller.state)
 
-                    cam_fwd, cam_up = get_camera_vectors(
-                        drone_orn, drone_pos, look_at)
-                    view, proj = build_camera_matrices(
-                        drone_pos, cam_fwd, cam_up)
+                    # ── Annotate ──────────────────────────────────────────────
+                    tree       = controller.current_tree
+                    tree_label = tree["id"] if tree else "—"
+                    tree_idx   = min(controller.tree_idx + 1,
+                                     len(config["trees"]))
+                    orbit_pct  = (controller.orbit_progress
+                                  if controller.state == DroneController.INSPECT
+                                  else 0.0)
 
-                    raw_frame = capture_frame(view, proj)
-                    frame     = enhance_frame(raw_frame)
+                    annotated = annotate(
+                        frame        = latest_frame,
+                        rcnn_boxes   = rcnn_boxes,
+                        drone_pos    = drone_pos,
+                        state        = controller.state,
+                        tree_label   = tree_label,
+                        tree_idx     = tree_idx,
+                        total_trees  = len(config["trees"]),
+                        orbit_pct    = orbit_pct,
+                        orbit_radius = controller.orbit_radius,
+                        frame_no     = log.frame_no,
+                        saved_no     = log.saved_no,
+                        fps          = inference_fps,
+                    )
 
-                    rcnn_boxes              = []
-                    controller.egg_detected = False
+                    if rcnn_boxes:
+                        log.save_frame(annotated)
 
-                if rcnn_boxes:
-                    log.log_rcnn_detection(
-                        len(rcnn_boxes), drone_pos, controller.state)
+                    if show(annotated):
+                        print("\nStopped by user (q).")
+                        break
 
-                # ── Step 7: Annotate frame ────────────────────────────────────
-                tree       = controller.current_tree
-                tree_label = tree["id"] if tree else "—"
-                tree_idx   = min(controller.tree_idx + 1, len(config["trees"]))
-                orbit_pct  = (controller.orbit_progress
-                              if controller.state == DroneController.INSPECT
-                              else 0.0)
+                    log.print_heartbeat(
+                        drone_pos, controller.state, tree_label,
+                        len(rcnn_boxes), inference_fps)
 
-                annotated = annotate(
-                    frame        = frame,
-                    rcnn_boxes   = rcnn_boxes,
-                    drone_pos    = drone_pos,
-                    state        = controller.state,
-                    tree_label   = tree_label,
-                    tree_idx     = tree_idx,
-                    total_trees  = len(config["trees"]),
-                    orbit_pct    = orbit_pct,
-                    orbit_radius = controller.orbit_radius,
-                    frame_no     = log.frame_no,
-                    saved_no     = log.saved_no,
-                    fps          = capture_fps,
-                )
-
-                # ── Step 8: Save frame when R-CNN detects egg mass ────────────
-                if rcnn_boxes:
-                    log.save_frame(annotated)
-
-                # ── Step 9: Display + heartbeat ───────────────────────────────
-                if show(annotated):
-                    print("\nStopped by user (q).")
-                    break
-
-                log.print_heartbeat(
-                    drone_pos, controller.state, tree_label,
-                    len(rcnn_boxes), capture_fps)
-
-                log.tick_frame()
+                    log.tick_frame()
 
                 _remaining = _step_deadline - time.perf_counter()
                 if _remaining > 0:
@@ -366,7 +380,8 @@ def run(config_path: str, fps_override: int | None = None) -> None:
         finally:
             close_windows()
             p.disconnect()
-            log.print_summary()
+            log.print_summary(missed_frames=total_missed_frames,
+                               sim_time=physics_step * dt)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -379,6 +394,6 @@ if __name__ == "__main__":
         help="Path to the JSON environment config  (default: config.json)")
     ap.add_argument(
         "--fps", type=int, default=None,
-        help="Override capture frame rate in frames-per-second")
+        help="Override inference frame rate in frames-per-second")
     args = ap.parse_args()
     run(args.config, args.fps)
