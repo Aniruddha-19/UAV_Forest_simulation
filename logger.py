@@ -6,7 +6,7 @@ Manages all file-based output for a simulation run:
   • Creates the run directory  (logs/YYYYMMDD_HHMMSS/)
   • Creates the frames sub-directory
   • Opens and writes the detections CSV log
-  • Saves annotated JPEG frames when egg masses are detected
+  • Saves annotated JPEG frames when adult SLF are detected
   • Prints the final summary to the terminal
 
 CSV schema
@@ -14,8 +14,8 @@ CSV schema
 time_s        — seconds elapsed since simulation start
 frame         — total rendered frame index
 saved_frame   — index within the detection-only saved frames
-egg_mass_id   — config ID of the detected egg mass, or blob count label
-em_x/y/z     — world position of the egg mass (blank for seg-only rows)
+adult_slf_id  — config ID of the detected adult SLF panel, or blob count label
+em_x/y/z     — world position of the panel (blank for seg-only rows)
 drone_x/y/z  — drone world position at time of detection
 state         — controller state ("TRANSIT" / "INSPECT" / "HOME")
 detection_method — "geometric_fov" or "colour_segmentation"
@@ -37,7 +37,7 @@ class SimulationLogger:
     """
 
     CSV_HEADER = [
-        "time_s", "frame", "saved_frame", "egg_mass_id",
+        "time_s", "frame", "saved_frame", "adult_slf_id",
         "em_x", "em_y", "em_z",
         "drone_x", "drone_y", "drone_z",
         "state", "detection_method",
@@ -93,7 +93,7 @@ class SimulationLogger:
 
         Parameters
         ----------
-        n_boxes   : number of egg mass boxes found by the RCNN
+        n_boxes   : number of adult SLF boxes found by the RCNN
         drone_pos : drone world position
         state     : current controller state string
         """
@@ -111,7 +111,7 @@ class SimulationLogger:
 
     def save_frame(self, annotated_frame) -> None:
         """
-        Save *annotated_frame* as a JPEG only when egg masses were detected.
+        Save *annotated_frame* as a JPEG only when adult SLF were detected.
         Increments saved_no and returns the file path used.
         """
         path = self.frames_dir / f"frame_{self.saved_no:06d}.jpg"
@@ -130,34 +130,35 @@ class SimulationLogger:
                          state:       str,
                          tree_label:  str,
                          n_rcnn:      int,
-                         inference_fps: float) -> None:
-        """
-        Print a one-line status update every 5 seconds of inferred time.
-        """
-        interval = max(1, round(inference_fps * 5))
-        if self.frame_no % interval != 0:
+                         infer_count: int,
+                         detect_pct:  float) -> None:
+        """Print a one-line status update every 10 inferences."""
+        if infer_count == 0 or infer_count % 10 != 0:
             return
         print(
             f"  t={self.elapsed:6.1f}s | f={self.frame_no:5d} |"
             f" saved={self.saved_no:4d} | {state:8s} |"
             f" tree={tree_label:8s} |"
             f" Pos({drone_pos[0]:5.1f},{drone_pos[1]:5.1f},{drone_pos[2]:4.1f})"
-            f" | rcnn={n_rcnn}"
+            f" | rcnn={n_rcnn} | SLF={detect_pct:.1f}%"
         )
 
-    def print_summary(self, missed_frames: int = 0, sim_time: float = 0.0) -> None:
+    def print_summary(self, sim_time: float = 0.0,
+                       infer_count: int = 0,
+                       detect_count: int = 0) -> None:
         """Print the end-of-run summary table."""
         mins, secs = divmod(int(sim_time), 60)
-        total_cam = self.frame_no + missed_frames
-        miss_pct  = (missed_frames / total_cam * 100) if total_cam > 0 else 0.0
+        det_pct    = (detect_count / infer_count * 100) if infer_count > 0 else 0.0
         print("\n" + "=" * 60)
         print("  Simulation complete")
         print("=" * 60)
         print(f"  Simulation time : {mins}m {secs:02d}s  ({sim_time:.1f} s)")
-        print(f"  Camera frames   : {total_cam}  (captured by sensor)")
-        print(f"  Inferred frames : {self.frame_no}  (processed by model)")
-        print(f"  Missed frames   : {missed_frames}  ({miss_pct:.1f}% dropped)")
-        print(f"  Frames saved    : {self.saved_no}  (RCNN detections only)")
+        print(f"  Display frames  : {self.frame_no}  (shown to operator)")
+        print(f"  Frames saved    : {self.saved_no}  (detections only)")
+        print(f"  ── Adult SLF Detection (waiting-time inference) ───")
+        print(f"  Inferences run  : {infer_count}")
+        print(f"  Detections      : {detect_count}  ({det_pct:.1f}%)")
+        print(f"  ───────────────────────────────────────────────────")
         print(f"  Frames dir      : {self.frames_dir.resolve()}")
         print(f"  Detection log   : {self.csv_path.resolve()}")
         print("=" * 60)

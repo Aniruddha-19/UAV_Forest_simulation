@@ -2,7 +2,7 @@
 environment.py
 ==============
 Responsible for initialising the PyBullet physics world and spawning
-every physical object in the scene: ground plane, trees, egg masses,
+every physical object in the scene: ground plane, trees, adult SLF panels,
 and the drone body.
 
 All functions return the PyBullet body ID(s) of the created objects so
@@ -16,18 +16,18 @@ import os
 import pybullet as p
 import pybullet_data
 
-# Image textures randomly assigned to egg masses — all images from simulation_test_data/.
+# Adult SLF images loaded from simulation_test_data/.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _TEST_DATA_DIR = os.path.join(_SCRIPT_DIR, "simulation_test_data")
-_EGG_IMAGES = sorted(
+_SLF_IMAGES = sorted(
     f for ext in ("*.png", "*.jpg", "*.jpeg")
     for f in glob.glob(os.path.join(_TEST_DATA_DIR, ext))
 )
-if not _EGG_IMAGES:
-    print("[environment] WARNING: no egg-mass texture images found in "
-          "simulation_test_data/. Egg masses will render as plain yellow panels.")
+if not _SLF_IMAGES:
+    print("[environment] WARNING: no adult SLF images found in "
+          "simulation_test_data/. Panels will render as plain yellow.")
 else:
-    print(f"[environment] Loaded {len(_EGG_IMAGES)} egg-mass texture(s) "
+    print(f"[environment] Loaded {len(_SLF_IMAGES)} adult SLF image(s) "
           f"from simulation_test_data/")
 
 
@@ -109,11 +109,11 @@ def spawn_tree(position: list, height: float, trunk_radius: float) -> tuple[int,
     return trunk_id, canopy_id
 
 
-# ── Egg mass ──────────────────────────────────────────────────────────────────
+# ── Adult SLF panel ───────────────────────────────────────────────────────────
 
-def spawn_egg_mass(position: list,
-                   trunk_position: list,
-                   image_path: str | None = None) -> int:
+def spawn_slf_panel(position: list,
+                    trunk_position: list,
+                    image_path: str | None = None) -> int:
     """
     Spawn a flat 3-inch-square image panel flush against the trunk surface.
 
@@ -205,48 +205,108 @@ def spawn_drone(position: list) -> int:
 
 # ── Scene builder (convenience wrapper) ───────────────────────────────────────
 
+def _make_panel_layout(n_panels: int,
+                       trunk_height: float,
+                       n_angles: int = 4) -> list[tuple[float, float]]:
+    """
+    Return (angle_rad, height_m) pairs for n_panels panels on one trunk.
+
+    Panels are arranged on a grid: n_angles columns evenly spaced around the
+    trunk × enough height rows to cover n_panels.  Heights run from 0.35 m up
+    to min(2.5 m, trunk_height − 0.30 m) so panels stay within the drone's
+    camera view during inspection.
+    """
+    h_min = 0.35
+    h_max = max(h_min + 0.10, min(2.50, trunk_height - 0.30))
+
+    n_heights = math.ceil(n_panels / n_angles)
+    if n_heights == 1:
+        heights = [h_min]
+    else:
+        heights = [h_min + (h_max - h_min) * k / (n_heights - 1)
+                   for k in range(n_heights)]
+
+    layout: list[tuple[float, float]] = []
+    for h in heights:
+        for a_i in range(n_angles):
+            if len(layout) >= n_panels:
+                break
+            angle = 2.0 * math.pi * a_i / n_angles
+            layout.append((angle, h))
+
+    return layout
+
+
 def build_scene(config: dict) -> list[dict]:
     """
-    Spawn all trees and their egg masses from the config.
-
-    Egg mass images cycle sequentially through all images in simulation_test_data/
-    across every egg mass in the scene.  Each panel is oriented to face outward
-    from its parent trunk axis.
+    Spawn all trees and auto-generate one image panel per image found in
+    simulation_test_data/, distributing them evenly across all trees at
+    varying heights and angular positions.
 
     Returns
     -------
-    egg_masses : list of dicts, each with keys:
-        'id'         – label string from config
+    slf_panels : list of dicts, each with keys:
+        'id'         – label string  (e.g. "T1-A", "T2-K")
         'tree_id'    – id of the parent tree
-        'position'   – [x, y, z] world position
-        'body'       – PyBullet body ID of the egg mass panel
-        'image_path' – absolute path to the assigned bug image (may be None)
+        'position'   – [x, y, z] world position of the panel centre
+        'body'       – PyBullet body ID of the panel
+        'image_path' – absolute path to the assigned image (may be None)
     """
-    egg_masses: list[dict] = []
-    _img_idx = 0   # cycles sequentially through _EGG_IMAGES across all egg masses
+    slf_panels: list[dict] = []
 
-    for tree_cfg in config["trees"]:
+    trees   = config["trees"]
+    n_trees = len(trees)
+    n_total = len(_SLF_IMAGES)
+
+    if n_total == 0:
+        print("[environment] No images found — spawning trees without panels.")
+
+    base  = n_total // n_trees if n_trees else 0
+    extra = n_total % n_trees  if n_trees else 0
+    # first `extra` trees receive base+1 panels, the rest receive base
+
+    img_idx = 0
+    for t_i, tree_cfg in enumerate(trees):
         spawn_tree(
             position     = tree_cfg["position"],
             height       = tree_cfg.get("height", 4.0),
             trunk_radius = tree_cfg.get("radius", 0.30),
         )
-        trunk_pos = tree_cfg["position"]
-        for em in tree_cfg.get("egg_masses", []):
-            img_path = (_EGG_IMAGES[_img_idx % len(_EGG_IMAGES)]
-                        if _EGG_IMAGES else None)
-            _img_idx += 1
-            body = spawn_egg_mass(
-                position       = em["position"],
+
+        trunk_pos    = tree_cfg["position"]
+        trunk_radius = tree_cfg.get("radius", 0.30)
+        trunk_height = tree_cfg.get("height", 4.0)
+        n_panels     = base + (1 if t_i < extra else 0)
+
+        if n_panels == 0:
+            continue
+
+        layout = _make_panel_layout(n_panels, trunk_height)
+
+        for p_i, (angle, height) in enumerate(layout):
+            r      = trunk_radius + 0.005
+            em_pos = [
+                trunk_pos[0] + r * math.cos(angle),
+                trunk_pos[1] + r * math.sin(angle),
+                height,
+            ]
+            img_path = _SLF_IMAGES[img_idx] if _SLF_IMAGES else None
+            img_idx += 1
+
+            em_id = f"T{t_i + 1}-{chr(65 + p_i)}"
+            body  = spawn_slf_panel(
+                position       = em_pos,
                 trunk_position = trunk_pos,
                 image_path     = img_path,
             )
-            egg_masses.append({
-                "id":         em["id"],
+            slf_panels.append({
+                "id":         em_id,
                 "tree_id":    tree_cfg["id"],
-                "position":   em["position"],
+                "position":   em_pos,
                 "body":       body,
                 "image_path": img_path,
             })
 
-    return egg_masses
+    print(f"[environment] Spawned {len(slf_panels)} panels across "
+          f"{n_trees} trees ({base}–{base + (1 if extra else 0)} per tree).")
+    return slf_panels

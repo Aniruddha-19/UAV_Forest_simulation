@@ -28,7 +28,8 @@ def annotate(frame:        np.ndarray,
              orbit_radius: float,
              frame_no:     int,
              saved_no:     int,
-             fps:          int) -> np.ndarray:
+             detect_pct:   float = 0.0,
+             infer_count:  int   = 0) -> np.ndarray:
     """
     Compose all annotations onto a copy of *frame* and return the result.
 
@@ -36,12 +37,12 @@ def annotate(frame:        np.ndarray,
       1. Faster R-CNN detections — red bounding rectangles
       2. Orbit progress bar     — shown only during INSPECT state
       3. HUD text panel         — state, tree, position, orbit radius, frame counters
-      4. Detection banner       — bright green banner when RCNN detects egg mass
+      4. Detection banner       — bright green banner when RCNN detects adult SLF
 
     Parameters
     ----------
     frame        : processed BGR frame from camera.capture_and_process()
-    rcnn_boxes   : list of (x1,y1,x2,y2) from detector.detect_egg_masses()
+    rcnn_boxes   : list of (x1,y1,x2,y2) from detector.detect_adult_slf()
     drone_pos    : drone world position [x, y, z]
     state        : controller state string ("TRANSIT", "INSPECT", "HOME")
     tree_label   : ID string of the current tree, or "—"
@@ -63,7 +64,7 @@ def annotate(frame:        np.ndarray,
     _draw_orbit_bar(out, state, orbit_pct)
     _draw_hud(out, state, tree_label, tree_idx, total_trees,
                drone_pos, len(rcnn_boxes), orbit_radius,
-               frame_no, saved_no, fps)
+               frame_no, saved_no, detect_pct, infer_count)
     _draw_detection_banner(out, rcnn_boxes)
 
     return out
@@ -94,12 +95,12 @@ def close_windows() -> None:
 def _draw_rcnn_boxes(img: np.ndarray,
                      rcnn_boxes: list[tuple[int, int, int, int]]) -> None:
     """
-    Draw a red bounding rectangle for each egg mass found by Faster R-CNN.
+    Draw a red bounding rectangle for each adult SLF found by Faster R-CNN.
     """
     COLOUR = (0, 0, 220)   # red (BGR)
     for (x1, y1, x2, y2) in rcnn_boxes:
         cv2.rectangle(img, (x1, y1), (x2, y2), COLOUR, 2)
-        cv2.putText(img, "egg mass", (x1, y1 - 5),
+        cv2.putText(img, "adult SLF", (x1, y1 - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, COLOUR, 1)
 
 
@@ -144,7 +145,8 @@ def _draw_hud(img: np.ndarray,
               drone_pos: np.ndarray,
               n_rcnn: int, orbit_radius: float,
               frame_no: int, saved_no: int,
-              fps: int) -> None:
+              detect_pct: float = 0.0,
+              infer_count: int = 0) -> None:
     """
     Draw the heads-up display text panel in the top-left corner.
     Text colour changes between TRANSIT (green) and INSPECT (cyan-blue).
@@ -160,12 +162,13 @@ def _draw_hud(img: np.ndarray,
     hud_lines = [
         f"State  : {state}",
         f"Tree   : {tree_label}  ({tree_idx} / {total_trees})",
-        f"FPS    : {fps}",
+        f"Feed   : 30 fps  (waiting-time inference)",
         f"Frame  : {frame_no}   Saved: {saved_no}",
         (f"Pos    : ({drone_pos[0]:.1f},  {drone_pos[1]:.1f},"
          f"  {drone_pos[2]:.1f}) m"),
         radius_line,
         f"RCNN   : {n_rcnn} detection{'s' if n_rcnn != 1 else ''}",
+        f"SLF    : {detect_pct:.1f}%  ({infer_count} inferences)",
     ]
 
     for i, line in enumerate(hud_lines):
@@ -176,13 +179,13 @@ def _draw_hud(img: np.ndarray,
 def _draw_detection_banner(img: np.ndarray,
                             rcnn_boxes: list) -> None:
     """
-    Draw a bright green 'EGG MASS DETECTED' banner in the top-right corner
-    when Faster R-CNN finds at least one egg mass.
+    Draw a bright green 'ADULT SLF DETECTED' banner in the top-right corner
+    when Faster R-CNN finds at least one adult SLF.
     """
     if not rcnn_boxes:
         return
-    cv2.rectangle(img, (IMG_W - 165, 5), (IMG_W - 5, 30), (0, 200, 0), -1)
-    cv2.putText(img, "EGG MASS DETECTED", (IMG_W - 163, 22),
+    cv2.rectangle(img, (IMG_W - 175, 5), (IMG_W - 5, 30), (0, 200, 0), -1)
+    cv2.putText(img, "ADULT SLF DETECTED", (IMG_W - 173, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1)
 
 

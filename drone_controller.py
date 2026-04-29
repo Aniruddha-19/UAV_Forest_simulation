@@ -86,7 +86,7 @@ class DroneController:
         self._orbit_angle   = 0.0    # current angle on the orbit circle (radians)
         self._orbit_accum   = 0.0    # radians completed in the current orbit
         self._current_orbit_radius = 0.0  # dynamic radius during INSPECT; shrinks when R-CNN misses
-        self.egg_detected   = False  # set True by main loop when R-CNN finds an egg mass
+        self.slf_detected   = False  # set True by main loop when R-CNN finds an adult SLF
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -130,14 +130,14 @@ class DroneController:
         """
         Orbit radius used at inspect altitude — just outside the trunk.
         Much smaller than _effective_radius so the camera is close enough
-        for Faster R-CNN to resolve egg masses on the bark.
+        for Faster R-CNN to resolve adult SLFes on the bark.
         """
         return tree.get("radius", 0.30) + self.close_clearance
 
     def trunk_look_at(self, tree: dict) -> list[float]:
         """
         The point the camera looks at during trunk inspection.
-        Aimed at mid-trunk height so egg masses (low on the trunk) are
+        Aimed at mid-trunk height so adult SLFes (low on the trunk) are
         centred in the camera frame.
         """
         pos = tree["position"]
@@ -230,7 +230,7 @@ class DroneController:
             self._orbit_angle = 0.0
             self._orbit_accum = 0.0
             self._current_orbit_radius = close_r   # start at full close radius; shrinks if R-CNN misses
-            self.egg_detected = False              # ensure approach starts immediately on entry
+            self.slf_detected = False              # ensure approach starts immediately on entry
             self.state = self.INSPECT
             print(f"  [INSPECT]  Orbiting trunk  id = {tree['id']}"
                   f"  alt = {self.inspect_alt} m  r = {close_r:.2f} m")
@@ -239,7 +239,7 @@ class DroneController:
         """
         Circle the tree trunk at inspect_altitude.  Position is computed
         analytically from the orbit angle — smooth, no jitter.
-        Drone faces inward; camera looks at the trunk at mid-egg-mass height.
+        Drone faces inward; camera looks at the trunk at mid-adult-SLF height.
         Switches to ASCEND when a full 360° orbit is complete.
         """
         tree = self.current_tree
@@ -249,7 +249,7 @@ class DroneController:
         # trunk until either a detection fires or the minimum safe clearance is
         # reached.  Once R-CNN detects, hold the current radius and slow down so
         # the model can capture the best possible frames.
-        if not self.egg_detected:
+        if not self.slf_detected:
             min_r = tree.get("radius", 0.30) + self.min_orbit_clearance
             self._current_orbit_radius = max(
                 min_r,
@@ -258,8 +258,8 @@ class DroneController:
 
         r = self._current_orbit_radius
 
-        # Slow orbit on detection so R-CNN gets more frames of the egg mass
-        speed = self.slow_orbit_speed if self.egg_detected else self.orbit_speed
+        # Slow orbit on detection so R-CNN gets more frames of the adult SLF
+        speed = self.slow_orbit_speed if self.slf_detected else self.orbit_speed
 
         delta_angle        = speed * self.dt
         self._orbit_angle += delta_angle

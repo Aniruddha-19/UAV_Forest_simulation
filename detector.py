@@ -1,12 +1,12 @@
 """
 detector.py
 ===========
-Faster R-CNN inference wrapper for real-time egg mass detection.
+Faster R-CNN inference wrapper for real-time adult SLF detection.
 
 Loads the trained model once at import time and exposes a single function:
 
-    detect_egg_masses(frame_bgr, threshold=0.25)
-        → list of (x1, y1, x2, y2) bounding boxes for 'egg masses' detections
+    detect_adult_slf(frame_bgr, threshold=0.25)
+        → list of (x1, y1, x2, y2) bounding boxes for 'adult' detections
 
 The model and config live in the faster-rcnn-model/ subdirectory relative
 to this file.  sys.path is temporarily extended so that model.py and
@@ -48,17 +48,17 @@ _transform = T.Compose([
     T.ToTensor(),
 ])
 
-_EGG_CLASS = "egg masses"
+_ADULT_CLASS = "adult"
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def detect_egg_masses(frame_bgr: np.ndarray,
-                      threshold: float = 0.10
-                      ) -> list[tuple[int, int, int, int]]:
+def detect_adult_slf(frame_bgr: np.ndarray,
+                     threshold: float = 0.10
+                     ) -> list[tuple[int, int, int, int]]:
     """
     Run Faster R-CNN on *frame_bgr* (a BGR uint8 numpy array from OpenCV /
-    PyBullet) and return bounding boxes for all 'egg masses' detections that
+    PyBullet) and return bounding boxes for all 'adult' SLF detections that
     exceed *threshold* confidence.
 
     Parameters
@@ -70,7 +70,7 @@ def detect_egg_masses(frame_bgr: np.ndarray,
     Returns
     -------
     List of (x1, y1, x2, y2) integer bounding boxes, one per detection.
-    Empty list when no egg masses are found.
+    Empty list when no adult SLF are found.
     """
     # BGR → RGB (model was trained on RGB images)
     rgb    = frame_bgr[:, :, ::-1].copy()
@@ -91,7 +91,7 @@ def detect_egg_masses(frame_bgr: np.ndarray,
     raw_boxes = outputs[0]["boxes"].numpy().astype(int)
 
     for box, score, label in zip(raw_boxes, scores, labels):
-        if score >= threshold and CLASSES[label] == _EGG_CLASS:
+        if score >= threshold and CLASSES[label] == _ADULT_CLASS:
             boxes.append((int(box[0]), int(box[1]), int(box[2]), int(box[3])))
 
     return boxes
