@@ -160,6 +160,17 @@ class DroneController:
         pos, orn = p.getBasePositionAndOrientation(self.drone_id)
         return np.array(pos, dtype=float), orn
 
+    def force_inspect_complete(self) -> None:
+        """
+        End the current INSPECT immediately and proceed to ASCEND, regardless
+        of how much of the 360° orbit has been completed. Used by the camera
+        feed to cut the orbit short once the 10 s video clip has played
+        through once.
+        """
+        if self.state == self.INSPECT:
+            self.state = self.ASCEND
+            print("  [ASCEND]  Video clip ended — climbing to cruise altitude")
+
     def step(self) -> None:
         """
         Advance the drone by one simulation time-step.

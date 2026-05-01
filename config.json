@@ -53,7 +53,7 @@
         "weights": "models/frcnn/fasterrcnn.pth",
         "threshold": 0.5,
         "imgsz": [3840, 2160],
-        "inference_wait_seconds": 0.6456
+        "inference_wait_seconds": 2.11
       },
       "fcos": {
         "weights": "models/fcos/fcos.pth",

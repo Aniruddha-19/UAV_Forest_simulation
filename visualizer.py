@@ -30,7 +30,8 @@ def annotate(frame:        np.ndarray,
              frame_no:     int,
              saved_no:     int,
              detect_pct:   float = 0.0,
-             infer_count:  int   = 0) -> np.ndarray:
+             infer_count:  int   = 0,
+             n_detections: int | None = None) -> np.ndarray:
     """
     Compose all annotations onto a copy of *frame* and return the result.
 
@@ -61,10 +62,13 @@ def annotate(frame:        np.ndarray,
     """
     out = frame.copy()
 
+    if n_detections is None:
+        n_detections = len(rcnn_boxes)
+
     _draw_rcnn_boxes(out, rcnn_boxes)
     _draw_orbit_bar(out, state, orbit_pct)
     _draw_hud(out, state, tree_label, tree_idx, total_trees,
-               drone_pos, len(rcnn_boxes), orbit_radius,
+               drone_pos, n_detections, orbit_radius,
                frame_no, saved_no, detect_pct, infer_count)
     _draw_detection_banner(out, rcnn_boxes)
 

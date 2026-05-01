@@ -253,18 +253,20 @@ def run(config_path: str) -> None:
                 physics_step += 1
 
                 # ── Block A: update camera frame (every physics step) ─────────
-                # During INSPECT the camera plays back the preloaded video
-                # clip. The clock resets at each INSPECT entry, so every tree
-                # starts at frame 0; if INSPECT outlasts the clip the index
-                # wraps via modulo. Outside INSPECT the live frame is whatever
-                # PyBullet renders for the drone (handled in the display
-                # block below).
+                # During INSPECT the camera plays the preloaded video clip
+                # exactly ONCE per tree. The clock resets at each INSPECT
+                # entry. The moment the index would walk past the last frame
+                # we cut INSPECT short via controller.force_inspect_complete()
+                # — the drone immediately ASCENDs and moves to the next tree.
                 if controller.state == DroneController.INSPECT:
                     if _prev_state != DroneController.INSPECT:
                         _inspect_step_start = physics_step
-                    elapsed_s  = (physics_step - _inspect_step_start) * dt
-                    frame_idx  = int(elapsed_s * VIDEO_FPS) % _video_len
-                    _current_frame = _video_frames[frame_idx]
+                    elapsed_s = (physics_step - _inspect_step_start) * dt
+                    frame_idx = int(elapsed_s * VIDEO_FPS)
+                    if frame_idx >= _video_len:
+                        controller.force_inspect_complete()
+                    else:
+                        _current_frame = _video_frames[frame_idx]
                 _prev_state = controller.state
 
                 # ── Block B: inference dispatch (every physics step) ──────────
@@ -333,7 +335,13 @@ def run(config_path: str) -> None:
 
                     win1 = annotate(
                         frame        = live_frame,
-                        rcnn_boxes   = [],          # no boxes on live feed
+                        rcnn_boxes   = [],          # don't draw boxes on the
+                                                    # live frame (they apply
+                                                    # to the inferred frame)
+                        n_detections = len(_result_boxes),  # but the HUD
+                                                    # count should still
+                                                    # reflect the latest
+                                                    # inference result
                         drone_pos    = drone_pos,
                         state        = controller.state,
                         tree_label   = tree_label,
