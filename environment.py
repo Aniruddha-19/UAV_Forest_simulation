@@ -13,6 +13,7 @@ import glob
 import math
 import os
 
+import cv2
 import pybullet as p
 import pybullet_data
 
@@ -23,6 +24,29 @@ _SLF_IMAGES = sorted(
     f for ext in ("*.png", "*.jpg", "*.jpeg")
     for f in glob.glob(os.path.join(_TEST_DATA_DIR, ext))
 )
+
+# PyBullet's loadTexture rejects some JPEG variants (CMYK, progressive,
+# unusual color profiles, etc.). We re-encode every texture through OpenCV
+# into a cache directory of plain baseline RGB JPEGs that always load.
+_TEX_CACHE_DIR = os.path.join(_TEST_DATA_DIR, ".pybullet_tex_cache")
+os.makedirs(_TEX_CACHE_DIR, exist_ok=True)
+
+
+def _normalized_texture_path(src_path: str) -> str | None:
+    """
+    Return a path to a PyBullet-loadable copy of *src_path*. Cached on disk
+    so the conversion runs at most once per image. Returns None if the
+    source cannot be read.
+    """
+    base = os.path.splitext(os.path.basename(src_path))[0]
+    out  = os.path.join(_TEX_CACHE_DIR, f"{base}.jpg")
+    if os.path.isfile(out):
+        return out
+    img = cv2.imread(src_path, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    cv2.imwrite(out, img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    return out
 if not _SLF_IMAGES:
     print("[environment] WARNING: no adult SLF images found in "
           "simulation_test_data/. Panels will render as plain yellow.")
@@ -165,10 +189,13 @@ def spawn_slf_panel(position: list,
         basePosition=position,
         baseOrientation=orn)
 
-    # Apply image texture when file exists
+    # Apply image texture when file exists. Route through the cache so
+    # PyBullet always sees a plain baseline RGB JPEG it can decode.
     if image_path and os.path.isfile(image_path):
-        tex_id = p.loadTexture(image_path)
-        p.changeVisualShape(body_id, -1, textureUniqueId=tex_id)
+        norm_path = _normalized_texture_path(image_path)
+        if norm_path is not None:
+            tex_id = p.loadTexture(norm_path)
+            p.changeVisualShape(body_id, -1, textureUniqueId=tex_id)
 
     return body_id
 
@@ -246,11 +273,11 @@ def build_scene(config: dict) -> list[dict]:
     Returns
     -------
     slf_panels : list of dicts, each with keys:
-        'id'         – label string  (e.g. "T1-A", "T2-K")
-        'tree_id'    – id of the parent tree
-        'position'   – [x, y, z] world position of the panel centre
-        'body'       – PyBullet body ID of the panel
-        'image_path' – absolute path to the assigned image (may be None)
+        'id'         : label string  (e.g. "T1-A", "T2-K")
+        'tree_id'    : id of the parent tree
+        'position'   : [x, y, z] world position of the panel centre
+        'body'       : PyBullet body ID of the panel
+        'image_path' : absolute path to the assigned image (may be None)
     """
     slf_panels: list[dict] = []
 

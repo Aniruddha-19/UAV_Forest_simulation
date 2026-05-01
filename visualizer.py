@@ -162,7 +162,8 @@ def _draw_hud(img: np.ndarray,
     hud_lines = [
         f"State  : {state}",
         f"Tree   : {tree_label}  ({tree_idx} / {total_trees})",
-        f"Feed   : 30 fps  (waiting-time inference)",
+        f"Display: 30 fps",
+        f"Infer  : waiting-time",
         f"Frame  : {frame_no}   Saved: {saved_no}",
         (f"Pos    : ({drone_pos[0]:.1f},  {drone_pos[1]:.1f},"
          f"  {drone_pos[2]:.1f}) m"),

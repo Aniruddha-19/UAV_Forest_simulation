@@ -2,50 +2,49 @@
 """
 simulation.py  —  Entry point
 ==============================
-Wires together all simulation modules and runs the main loop.
 
-Module responsibilities
------------------------
-  environment.py      — PyBullet world setup, spawning trees / adult SLF panels / drone
-  drone_controller.py — TRANSIT → INSPECT → HOME state machine
-  camera.py           — frame capture, image processing constants
-  visualizer.py       — HUD annotation and OpenCV display
-  logger.py           — CSV log, frame saving, console heartbeat
+Architecture
+------------
+Main thread  (100 Hz physics loop)
+  • controller.step()   — moves the drone each tick
+  • p.stepSimulation()  — advances the PyBullet 3D world
+  • Every 3rd tick (30 fps):
+      Window 1 "Camera Feed"  — what the drone's camera sees right now
+      Window 2 "Model Output" — latest inference result
 
-Camera feed
------------
-  All 100 adult SLF images from simulation_test_data/ are loaded at startup,
-  randomly shuffled, and resized to config["simulation"]["camera_resolution"].
-  They form a looping 30-fps video feed (FEED_FPS).
+  During INSPECT the camera shows the image of whichever SLF panel the
+  drone is currently facing (within ±VIS_HALF_ANGLE degrees).  When the
+  drone faces bare bark between panels it sees a plain bark frame.  Not
+  every orbit direction has a panel, so the camera sees SLF images only
+  part of the time — matching the real scenario where some trees are more
+  infested than others.
 
-  TRANSIT / DESCEND / ASCEND / HOME
-      PyBullet getCameraImage() renders the 3D scene (top-down drone view).
-      The feed advances in the background but inference is not run.
+Inference thread  (daemon)
+  • Waits for a frame from the main thread.
+  • Runs detect_adult_slf() — takes T seconds (the natural waiting time).
+  • Returns (frame, boxes).
+  • Main thread sends the next frame only when the worker is free, so all
+    frames that arrived during inference are automatically skipped.
 
-  INSPECT
-      The feed plays.  On each camera step the current feed frame is grabbed
-      and fed to the model.  Because inference blocks the loop, the feed
-      automatically advances during model execution — this is the
-      "waiting-time" pattern: inference time IS the skip interval.
-      No frames between consecutive inferences are ever processed.
+Panel distribution
+  100 images from simulation_test_data/ are assigned by build_scene():
+    tree_1  → 12 panels
+    tree_2 … tree_9  → 11 panels each
+  Each panel sits at a specific angle and height on its trunk.
 
 Usage
 -----
     python simulation.py
     python simulation.py --config config.json
-
-Controls
---------
-    q       — quit from the camera-feed window
-    Ctrl-C  — interrupt from the terminal
+Controls: press 'q' in either window to quit.
 """
 
 import argparse
-import glob
 import json
 import math
 import os
-import random
+import queue
+import threading
 import time
 
 import cv2
@@ -55,161 +54,267 @@ import pybullet as p
 from camera           import (IMG_W, IMG_H,
                                build_camera_matrices, capture_frame,
                                enhance_frame, get_camera_vectors)
-from detector         import detect_adult_slf
+from detector         import (detect_adult_slf, get_active_model,
+                              get_inference_wait_s, init_detector)
 from drone_controller import DroneController
 from environment      import build_scene, init_world, spawn_drone
 from logger           import SimulationLogger
-from visualizer       import annotate, close_windows, show
+from visualizer       import annotate, close_windows
 
 
-# Feed frame rate — constant, independent of physics timestep
-FEED_FPS: float = 30.0
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+CAMERA_FPS      = 30.0
+WINDOW_FEED     = "Camera Feed  (30 fps)"
+WINDOW_MODEL    = "Model Output"
+
+# Half-angle within which a panel is considered visible by the camera
+_VIS_HALF_ANGLE = math.radians(30.0)
 
 
-# ── Configuration loader ──────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def load_config(config_path: str) -> dict:
-    with open(config_path) as f:
+def _angle_diff(a: float, b: float) -> float:
+    """Smallest signed difference a − b, wrapped to (−π, π]."""
+    return math.atan2(math.sin(a - b), math.cos(a - b))
+
+
+def _select_frame(panel_data: list[dict],
+                  facing: float,
+                  bark_frame: np.ndarray) -> np.ndarray:
+    """
+    Return the image of the panel closest to *facing* if any panel is within
+    _VIS_HALF_ANGLE, otherwise return *bark_frame*.
+    """
+    in_fov = [p for p in panel_data
+              if abs(_angle_diff(p["angle"], facing)) <= _VIS_HALF_ANGLE]
+    if not in_fov:
+        return bark_frame
+    best = min(in_fov, key=lambda p: abs(_angle_diff(p["angle"], facing)))
+    return best["bgr"] if best["bgr"] is not None else bark_frame
+
+
+# ── Inference thread ──────────────────────────────────────────────────────────
+
+def _inference_worker(frame_q: queue.Queue,
+                      result_q: queue.Queue,
+                      min_wait_s: float = 0.0) -> None:
+    """
+    Daemon: block on frame_q, run the model, push (frame, boxes) to result_q.
+    Receiving None is the stop signal.
+
+    If *min_wait_s* > 0, the worker pads each inference cycle to that
+    minimum duration — useful when you want a fixed inference cadence
+    independent of GPU speed.
+    """
+    while True:
+        frame = frame_q.get()
+        if frame is None:
+            break
+        t0 = time.perf_counter()
+        boxes = detect_adult_slf(frame)
+        elapsed = time.perf_counter() - t0
+        if min_wait_s > 0.0 and elapsed < min_wait_s:
+            time.sleep(min_wait_s - elapsed)
+        # Discard any unconsumed previous result
+        try:
+            result_q.get_nowait()
+        except queue.Empty:
+            pass
+        result_q.put((frame, boxes))
+
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+def load_config(path: str) -> dict:
+    with open(path) as f:
         return json.load(f)
 
 
-# ── Feed helpers ──────────────────────────────────────────────────────────────
+# ── Banner ────────────────────────────────────────────────────────────────────
 
-def _load_feed(test_dir: str, cam_w: int, cam_h: int) -> list[np.ndarray]:
-    """
-    Load every image from *test_dir*, shuffle randomly, resize to
-    (cam_w, cam_h) and return as a list ready for time-based playback.
-    """
-    paths = sorted(
-        f for ext in ("*.jpg", "*.jpeg", "*.png")
-        for f in glob.glob(os.path.join(test_dir, ext))
-    )
-    random.shuffle(paths)
-    frames = []
-    for path in paths:
-        img = cv2.imread(path)
-        if img is not None:
-            frames.append(cv2.resize(img, (cam_w, cam_h)))
-    return frames
-
-
-def _current_feed_frame(feed_frames: list[np.ndarray],
-                         feed_start: float) -> np.ndarray:
-    """Return the frame that is 'live' right now based on wall-clock time."""
-    idx = int((time.perf_counter() - feed_start) * FEED_FPS) % len(feed_frames)
-    return feed_frames[idx]
-
-
-# ── Startup banner ────────────────────────────────────────────────────────────
-
-def print_banner(config: dict, n_panels: int, n_feed: int,
+def print_banner(config: dict, n_panels: int,
                  cam_w: int, cam_h: int, log_dir) -> None:
     orbit_spd   = config["drone"].get("inspect_orbit_speed_deg", 20)
-    orbit_r     = config["drone"].get("inspect_radius", 3.0)
-    trunk_clr   = config["drone"].get("inspect_trunk_clearance", 1.0)
     inspect_alt = config["drone"].get("inspect_altitude", 2.0)
+    trunk_clr   = config["drone"].get("inspect_trunk_clearance", 1.0)
     print("=" * 60)
-    print("  UAV Tree Inspection Simulation  —  Adult SLF Detection")
+    print("  UAV Tree Inspection  —  Adult SLF Detection")
     print("=" * 60)
     print(f"  Trees          : {len(config['trees'])}")
-    print(f"  3D panels      : {n_panels}")
-    print(f"  Feed images    : {n_feed}  (randomly shuffled, looping)")
-    print(f"  Feed FPS       : {FEED_FPS:.0f} fps")
+    print(f"  SLF panels     : {n_panels}  (distributed across trees)")
     print(f"  Resolution     : {cam_w} × {cam_h}")
-    print(f"  Transit speed  : {config['drone']['transit_speed']} m/s")
-    print(f"  Cruise alt     : {config['drone']['cruise_altitude']} m")
+    print(f"  Camera FPS     : {CAMERA_FPS:.0f}")
+    print(f"  Panel FOV      : ±{math.degrees(_VIS_HALF_ANGLE):.0f}°")
     print(f"  Inspect alt    : {inspect_alt} m")
-    print(f"  Canopy radius  : {orbit_r} m")
     print(f"  Trunk clearance: {trunk_clr} m")
     print(f"  Orbit speed    : {orbit_spd} °/s  "
-          f"(360° ≈ {360 / orbit_spd:.0f} s / tree)")
-    print(f"  Inference      : waiting-time pattern (no fixed FPS)")
+          f"(360° ≈ {360/orbit_spd:.0f} s / tree)")
+    wait_s = get_inference_wait_s()
+    model_label = get_active_model() or "?"
+    if wait_s > 0:
+        print(f"  Detector       : {model_label}  (waiting-time = {wait_s:.2f} s)")
+    else:
+        print(f"  Detector       : {model_label}  (waiting-time = GPU-paced)")
+    print(f"  Window         : {WINDOW_MODEL!r}")
     print(f"  Logs           : {log_dir}")
-    print("  Press 'q' in the camera window to quit.")
+    print("  Press 'q' in either window to quit.")
     print("=" * 60)
 
 
-# ── Main simulation loop ──────────────────────────────────────────────────────
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run(config_path: str) -> None:
     config   = load_config(config_path)
     dt       = config["simulation"]["time_step"]
     cam_res  = config["simulation"].get("camera_resolution", [640, 480])
-    cam_w, cam_h = int(cam_res[0]), int(cam_res[1])
-    camera_fps      = config["drone"].get("camera_fps", 30)
-    camera_interval = max(1, round(1.0 / (camera_fps * dt)))
+    cam_w, cam_h    = int(cam_res[0]), int(cam_res[1])
+    camera_interval = max(1, round(1.0 / (CAMERA_FPS * dt)))
 
-    # ── Step 1: Load camera feed ──────────────────────────────────────────────
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _test_dir   = os.path.join(_script_dir, "simulation_test_data")
-    feed_frames = _load_feed(_test_dir, cam_w, cam_h)
-    if not feed_frames:
-        print("[sim] WARNING: no feed images found — inspection display will be blank.")
-        feed_frames = [np.zeros((cam_h, cam_w, 3), dtype=np.uint8)]
-    print(f"[sim] Feed: {len(feed_frames)} frames @ {cam_w}×{cam_h}, {FEED_FPS:.0f} fps")
+    # Load the active detector backend defined in config['detector'].
+    init_detector(config)
+    inference_wait_s = get_inference_wait_s()
 
-    # ── Step 2: Initialise world & build scene ────────────────────────────────
+    # Bark frame shown when the drone faces bare trunk between panels
+    _BARK_FRAME = np.full((cam_h, cam_w, 3), (70, 90, 110), dtype=np.uint8)
+
+    # ── Build scene ───────────────────────────────────────────────────────────
     init_world(config)
-    slf_data = build_scene(config)     # spawns 3D panels; image paths not used here
+    slf_data = build_scene(config)        # 12 + 11×8 = 100 panels in PyBullet
     drone_id = spawn_drone(config["drone"]["start_position"])
-
-    # ── Step 3: Initialise drone controller ───────────────────────────────────
     controller = DroneController(drone_id, config, config["trees"])
 
-    # ── Step 4: Open logger & run ─────────────────────────────────────────────
+    # ── Preload panel images keyed by tree ────────────────────────────────────
+    # For each panel: store its bearing angle from the trunk centre and its
+    # BGR image resized to the configured camera resolution.
+    # This is the data the camera uses during INSPECT to pick what to show.
+    trunk_pos_map = {t["id"]: t["position"] for t in config["trees"]}
+    tree_slf_data: dict[str, list[dict]] = {}
+
+    for panel in slf_data:
+        tp    = trunk_pos_map[panel["tree_id"]]
+        px, py = panel["position"][0], panel["position"][1]
+        angle  = math.atan2(py - tp[1], px - tp[0])
+
+        bgr = None
+        if panel.get("image_path"):
+            raw = cv2.imread(panel["image_path"])
+            if raw is not None:
+                bgr = cv2.resize(raw, (cam_w, cam_h))
+
+        tree_slf_data.setdefault(panel["tree_id"], []).append({
+            "id":    panel["id"],
+            "angle": angle,
+            "bgr":   bgr,
+        })
+
+    loaded = sum(1 for ps in tree_slf_data.values()
+                 for p in ps if p["bgr"] is not None)
+    print(f"[sim] Preloaded {loaded} / {len(slf_data)} panel images.")
+
+    # ── Inference thread ──────────────────────────────────────────────────────
+    _frame_q  = queue.Queue(maxsize=1)
+    _result_q = queue.Queue(maxsize=1)
+    _infer_thread = threading.Thread(
+        target=_inference_worker,
+        args=(_frame_q, _result_q, inference_wait_s),
+        daemon=True, name="inference-worker")
+    _infer_thread.start()
+
+    # ── Logger + main loop ────────────────────────────────────────────────────
     with SimulationLogger() as log:
         n_panels = len(slf_data)
-        print_banner(config, n_panels, len(feed_frames), cam_w, cam_h,
-                     log.run_dir.resolve())
+        print_banner(config, n_panels, cam_w, cam_h, log.run_dir.resolve())
 
-        physics_step = 0
-        latest_frame : np.ndarray = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+        physics_step   = 0
+        _worker_busy   = False
+        _result_frame: np.ndarray | None = None
+        _result_boxes: list = []
+        _new_result    = False         # True for one display tick per new result
+        _last_saved_frame: np.ndarray | None = None  # identity of last saved input
+        _infer_count   = 0
+        _detect_count  = 0
+        _current_frame = _BARK_FRAME   # what the camera sees right now
 
-        # Feed timing — reset each time the drone enters INSPECT
-        _feed_start: float | None = None
+        # Placeholder shown in Window 2 before first inference
+        _blank_win2 = _BARK_FRAME.copy()
+        cv2.putText(_blank_win2, "Waiting for first inference ...",
+                    (10, cam_h // 2), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (200, 200, 200), 1)
 
-        # Running inference statistics
-        _infer_count  = 0
-        _detect_count = 0
+        # Placeholder shown in Window 2 while the drone is not inspecting
+        # (TRANSIT / HOME / DONE), so the last frame of the previous tree
+        # does not stay frozen on screen.
+        _transit_win2 = _BARK_FRAME.copy()
+        cv2.putText(_transit_win2, "Transiting to next tree ...",
+                    (10, cam_h // 2), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (200, 200, 200), 1)
 
         try:
             while not controller.done:
 
                 _step_deadline = time.perf_counter() + dt
 
+                # ── Physics ───────────────────────────────────────────────────
                 controller.step()
                 p.stepSimulation()
                 physics_step += 1
 
-                # ── Combined camera + inference step ──────────────────────────
+                # ── Block A: update camera frame (every physics step) ─────────
+                # Recompute which panel (if any) the drone is currently facing.
+                # This runs at 100 Hz so the frame is always up to date.
+                if (controller.state == DroneController.INSPECT
+                        and controller.current_tree is not None):
+
+                    panels  = tree_slf_data.get(
+                        controller.current_tree["id"], [])
+                    facing  = controller.current_yaw + math.pi
+                    _current_frame = _select_frame(panels, facing, _BARK_FRAME)
+
+                # ── Block B: inference dispatch (every physics step) ──────────
+                # Collect result if worker just finished.
+                try:
+                    _result_frame, _result_boxes = _result_q.get_nowait()
+                    _worker_busy = False
+                    _infer_count += 1
+                    _new_result = True
+                    if _result_boxes:
+                        _detect_count += 1
+                    controller.slf_detected = bool(_result_boxes)
+                    if _result_boxes:
+                        drone_pos_log, _ = controller.pose()
+                        log.log_rcnn_detection(
+                            len(_result_boxes), drone_pos_log, controller.state)
+                except queue.Empty:
+                    pass
+
+                # Send next frame only when worker is free AND drone inspects.
+                # The frame sent is whatever the camera sees RIGHT NOW —
+                # all frames skipped while the model was busy are discarded.
+                if (not _worker_busy
+                        and controller.state == DroneController.INSPECT):
+                    _frame_q.put(_current_frame)
+                    _worker_busy = True
+
+                elif controller.state != DroneController.INSPECT:
+                    _worker_busy = False
+                    # Drop the previous tree's last result so Window 2 does
+                    # not stay frozen on it during TRANSIT.
+                    _result_frame = None
+                    _result_boxes = []
+                    _new_result = False
+                    _last_saved_frame = None
+                    controller.slf_detected = False
+
+                # ── Block C: display (30 fps) ─────────────────────────────────
                 if physics_step % camera_interval == 0:
 
                     drone_pos, drone_orn = controller.pose()
-                    rcnn_boxes: list = []
 
+                    # Window 1 — live camera view
                     if controller.state == DroneController.INSPECT:
-                        # ── INSPECT: 30-fps feed + waiting-time inference ──────
-                        if _feed_start is None:
-                            _feed_start = time.perf_counter()
-
-                        latest_frame = _current_feed_frame(feed_frames, _feed_start)
-
-                        # Run inference — this BLOCKS for T seconds (the waiting time).
-                        # The feed index advances automatically during that time, so
-                        # the next iteration picks up the frame that is current when
-                        # the model finishes.  All frames in between are skipped.
-                        rcnn_boxes = detect_adult_slf(latest_frame)
-                        _infer_count += 1
-                        if rcnn_boxes:
-                            _detect_count += 1
-
-                        controller.slf_detected = bool(rcnn_boxes)
-
+                        live_frame = _current_frame
                     else:
-                        # ── TRANSIT / HOME: PyBullet render, no inference ──────
-                        _feed_start = None          # reset so next INSPECT starts fresh
-                        controller.slf_detected = False
-
                         fwd     = np.array([math.cos(controller.current_yaw),
                                             math.sin(controller.current_yaw),
                                             0.0])
@@ -218,25 +323,21 @@ def run(config_path: str) -> None:
                             drone_orn, drone_pos, look_at)
                         view, proj = build_camera_matrices(
                             drone_pos, cam_fwd, cam_up)
-                        latest_frame = enhance_frame(capture_frame(view, proj))
-
-                    # ── Log + annotate + display ──────────────────────────────
-                    if rcnn_boxes:
-                        log.log_rcnn_detection(
-                            len(rcnn_boxes), drone_pos, controller.state)
+                        live_frame = enhance_frame(capture_frame(view, proj))
 
                     tree       = controller.current_tree
                     tree_label = tree["id"] if tree else "—"
-                    tree_idx   = min(controller.tree_idx + 1, len(config["trees"]))
+                    tree_idx   = min(controller.tree_idx + 1,
+                                     len(config["trees"]))
                     orbit_pct  = (controller.orbit_progress
                                   if controller.state == DroneController.INSPECT
                                   else 0.0)
                     det_pct    = (_detect_count / _infer_count * 100
                                   if _infer_count else 0.0)
 
-                    annotated = annotate(
-                        frame        = latest_frame,
-                        rcnn_boxes   = rcnn_boxes,
+                    win1 = annotate(
+                        frame        = live_frame,
+                        rcnn_boxes   = [],          # no boxes on live feed
                         drone_pos    = drone_pos,
                         state        = controller.state,
                         tree_label   = tree_label,
@@ -249,18 +350,48 @@ def run(config_path: str) -> None:
                         detect_pct   = det_pct,
                         infer_count  = _infer_count,
                     )
+                    cv2.imshow(WINDOW_FEED, win1)
 
-                    if rcnn_boxes:
-                        log.save_frame(annotated)
+                    # Window 2 — latest inference result
+                    if controller.state != DroneController.INSPECT:
+                        win2 = _transit_win2
+                    elif _result_frame is not None:
+                        win2 = annotate(
+                            frame        = _result_frame,
+                            rcnn_boxes   = _result_boxes,
+                            drone_pos    = drone_pos,
+                            state        = controller.state,
+                            tree_label   = tree_label,
+                            tree_idx     = tree_idx,
+                            total_trees  = len(config["trees"]),
+                            orbit_pct    = orbit_pct,
+                            orbit_radius = controller.orbit_radius,
+                            frame_no     = log.frame_no,
+                            saved_no     = log.saved_no,
+                            detect_pct   = det_pct,
+                            infer_count  = _infer_count,
+                        )
+                        # Save the annotated frame ONCE per *unique input
+                        # frame* with detections. Consecutive inferences on
+                        # the same panel image (same array identity) are
+                        # held on screen but not re-saved.
+                        if (_new_result and _result_boxes
+                                and _result_frame is not _last_saved_frame):
+                            log.save_frame(win2)
+                            _last_saved_frame = _result_frame
+                        _new_result = False
+                    else:
+                        win2 = _blank_win2
 
-                    if show(annotated):
+                    cv2.imshow(WINDOW_MODEL, win2)
+
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
                         print("\nStopped by user (q).")
                         break
 
                     log.print_heartbeat(
                         drone_pos, controller.state, tree_label,
-                        len(rcnn_boxes), _infer_count, det_pct)
-
+                        len(_result_boxes), _infer_count, det_pct)
                     log.tick_frame()
 
                 _remaining = _step_deadline - time.perf_counter()
@@ -271,6 +402,11 @@ def run(config_path: str) -> None:
             print("\nInterrupted (Ctrl-C).")
 
         finally:
+            try:
+                _frame_q.put_nowait(None)
+            except queue.Full:
+                pass
+            _infer_thread.join(timeout=3.0)
             close_windows()
             p.disconnect()
             log.print_summary(sim_time=physics_step * dt,
@@ -281,10 +417,7 @@ def run(config_path: str) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(
-        description="UAV Tree Inspection — adult SLF detection")
-    ap.add_argument(
-        "--config", default="config.json",
-        help="Path to the JSON config  (default: config.json)")
+    ap = argparse.ArgumentParser(description="UAV SLF Inspection Simulation")
+    ap.add_argument("--config", default="config.json")
     args = ap.parse_args()
     run(args.config)

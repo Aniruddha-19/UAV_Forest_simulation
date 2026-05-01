@@ -12,60 +12,15 @@
   },
 
   "trees": [
-    {
-      "id": "tree_1",
-      "position": [-7, -7, 0],
-      "height": 7.5,
-      "radius": 0.45
-    },
-    {
-      "id": "tree_2",
-      "position": [0, -7, 0],
-      "height": 6.5,
-      "radius": 0.40
-    },
-    {
-      "id": "tree_3",
-      "position": [7, -7, 0],
-      "height": 9.0,
-      "radius": 0.50
-    },
-    {
-      "id": "tree_4",
-      "position": [-7, 0, 0],
-      "height": 8.0,
-      "radius": 0.45
-    },
-    {
-      "id": "tree_5",
-      "position": [0, 0, 0],
-      "height": 6.2,
-      "radius": 0.38
-    },
-    {
-      "id": "tree_6",
-      "position": [7, 0, 0],
-      "height": 11.0,
-      "radius": 0.55
-    },
-    {
-      "id": "tree_7",
-      "position": [-7, 7, 0],
-      "height": 7.0,
-      "radius": 0.42
-    },
-    {
-      "id": "tree_8",
-      "position": [0, 7, 0],
-      "height": 9.5,
-      "radius": 0.48
-    },
-    {
-      "id": "tree_9",
-      "position": [7, 7, 0],
-      "height": 12.0,
-      "radius": 0.60
-    }
+    { "id": "tree_1", "position": [-7, -7, 0], "height": 7.5,  "radius": 0.45 },
+    { "id": "tree_2", "position": [ 0, -7, 0], "height": 6.5,  "radius": 0.40 },
+    { "id": "tree_3", "position": [ 7, -7, 0], "height": 9.0,  "radius": 0.50 },
+    { "id": "tree_4", "position": [-7,  0, 0], "height": 8.0,  "radius": 0.45 },
+    { "id": "tree_5", "position": [ 0,  0, 0], "height": 6.2,  "radius": 0.38 },
+    { "id": "tree_6", "position": [ 7,  0, 0], "height": 11.0, "radius": 0.55 },
+    { "id": "tree_7", "position": [-7,  7, 0], "height": 7.0,  "radius": 0.42 },
+    { "id": "tree_8", "position": [ 0,  7, 0], "height": 9.5,  "radius": 0.48 },
+    { "id": "tree_9", "position": [ 7,  7, 0], "height": 12.0, "radius": 0.60 }
   ],
 
   "drone": {
@@ -80,13 +35,70 @@
     "inspect_min_clearance": 0.5,
     "inspect_approach_speed": 0.05,
     "camera_source": null,
-    "camera_fps": 30,
-    "inference_fps": 1.7
+    "camera_fps": 30
   },
 
   "simulation": {
     "time_step": 0.01,
     "gravity": -9.81,
-    "camera_resolution": [640, 480]
+    "camera_resolution": [1280, 720]
+  },
+
+  "_detector_help": "active_model selects which backend is loaded. Each entry under models/ has its own weights, threshold, imgsz (or [w,h] for mobilenetv3), and inference_wait_seconds (minimum seconds per inference cycle — set to 0 to run as fast as the GPU allows). imgsz=null means use the model's native resize.",
+
+  "detector": {
+    "active_model": "frcnn",
+    "models": {
+      "frcnn": {
+        "weights": "models/frcnn/weights.pth",
+        "threshold": 0.5,
+        "imgsz": null,
+        "inference_wait_seconds": 5.77
+      },
+      "fcos": {
+        "weights": "models/fcos/fcos.pth",
+        "threshold": 0.5,
+        "imgsz": 640,
+        "inference_wait_seconds": 5.77
+      },
+      "retinanet_gn": {
+        "weights": "models/retinanet_gn/weights.pth",
+        "threshold": 0.5,
+        "imgsz": null,
+        "inference_wait_seconds": 5.77
+      },
+      "retinanet_bn": {
+        "weights": "models/retinanet_bn/weights.pth",
+        "threshold": 0.5,
+        "imgsz": null,
+        "inference_wait_seconds": 5.77
+      },
+      "yolo11": {
+        "weights": "models/yolo/yolo11.pt",
+        "threshold": 0.25,
+        "imgsz": 640,
+        "device": 0,
+        "inference_wait_seconds": 1.0
+      },
+      "yolo26": {
+        "weights": "models/yolo/yolo26.pt",
+        "threshold": 0.25,
+        "imgsz": 640,
+        "device": 0,
+        "inference_wait_seconds": 1.0
+      },
+      "rfdetr": {
+        "weights": "models/rfdetr/rfdetr_best.pth",
+        "threshold": 0.4,
+        "inference_wait_seconds": 2.0
+      },
+      "mobilenetv3": {
+        "weights": "models/mobilenetv3/weights.pth",
+        "label_path": "models/mobilenetv3/label.txt",
+        "threshold": 0.5,
+        "imgsz": [3840, 2160],
+        "inference_wait_seconds": 0.05
+      }
+    }
   }
 }

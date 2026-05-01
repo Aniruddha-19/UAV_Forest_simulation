@@ -1,97 +1,73 @@
 """
 detector.py
 ===========
-Faster R-CNN inference wrapper for real-time adult SLF detection.
+Backend dispatcher. Loads whichever backend is named by
+``config['detector']['active_model']`` and routes detect_adult_slf() through
+it.
 
-Loads the trained model once at import time and exposes a single function:
+Each backend lives in detectors/<name>.py and exposes:
+    init(name: str, cfg: dict) -> None
+    detect_adult_slf(frame_bgr, threshold=None) -> list[(x1,y1,x2,y2)]
 
-    detect_adult_slf(frame_bgr, threshold=0.25)
-        → list of (x1, y1, x2, y2) bounding boxes for 'adult' detections
-
-The model and config live in the faster-rcnn-model/ subdirectory relative
-to this file.  sys.path is temporarily extended so that model.py and
-config.py can be imported without installing them as a package.
+simulation.py calls init_detector(config) once, after loading the JSON
+config, and then uses detect_adult_slf() / get_inference_wait_s() as before.
 """
 
 import os
-import sys
 
 import numpy as np
-import torch
-from torchvision import transforms as T
 
-# ── Locate the faster-rcnn-model subdirectory ─────────────────────────────────
+from detectors import load_backend
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_FRCNN_DIR  = os.path.join(_SCRIPT_DIR, "faster-rcnn-model")
-_MODEL_PATH = os.path.join(_FRCNN_DIR, "outputs", "fasterrcnn.pth")
 
-# Temporarily add to sys.path so model.py / config.py can be imported
-sys.path.insert(0, _FRCNN_DIR)
-try:
-    from model  import create_model          # noqa: E402
-    from config import NUM_CLASSES, DEVICE, CLASSES  # noqa: E402
-finally:
-    # Remove the injected path so it doesn't interfere with other imports
-    sys.path.pop(0)
-
-# ── Load model once at module import ──────────────────────────────────────────
-print(f"[detector] Loading Faster R-CNN from {_MODEL_PATH} …")
-_model = create_model(num_classes=NUM_CLASSES)
-_checkpoint = torch.load(_MODEL_PATH, map_location=DEVICE)
-_model.load_state_dict(_checkpoint["model_state_dict"])
-_model.to(DEVICE).eval()
-print(f"[detector] Model ready on {DEVICE}. Classes: {CLASSES}")
-
-# ── Pre-built transform (reused every frame) ──────────────────────────────────
-_transform = T.Compose([
-    T.ToPILImage(),
-    T.ToTensor(),
-])
-
-_ADULT_CLASS = "adult"
+_backend = None
+_active_model = None
+_threshold = 0.5
+_inference_wait_s = 0.0
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+def _resolve_paths(cfg: dict, root: str) -> dict:
+    """Resolve relative weights/label_path entries against the project root."""
+    out = dict(cfg)
+    for key in ("weights", "label_path"):
+        v = out.get(key)
+        if v and not os.path.isabs(v):
+            out[key] = os.path.join(root, v)
+    return out
+
+
+def init_detector(config: dict) -> None:
+    """Initialize the active backend named in config['detector']."""
+    global _backend, _active_model, _threshold, _inference_wait_s
+
+    det_cfg = config["detector"]
+    active = det_cfg["active_model"]
+    model_cfg = _resolve_paths(det_cfg["models"][active], _SCRIPT_DIR)
+
+    print(f"[detector] Active model: {active}")
+    _active_model = active
+    _backend = load_backend(active, model_cfg)
+    _threshold = float(model_cfg.get("threshold", 0.5))
+    _inference_wait_s = float(model_cfg.get("inference_wait_seconds", 0.0))
+
 
 def detect_adult_slf(frame_bgr: np.ndarray,
-                     threshold: float = 0.10
-                     ) -> list[tuple[int, int, int, int]]:
-    """
-    Run Faster R-CNN on *frame_bgr* (a BGR uint8 numpy array from OpenCV /
-    PyBullet) and return bounding boxes for all 'adult' SLF detections that
-    exceed *threshold* confidence.
+                     threshold: float | None = None
+                     ) -> list:
+    if _backend is None:
+        raise RuntimeError(
+            "detector not initialized — call init_detector(config) first")
+    return _backend.detect_adult_slf(frame_bgr, threshold)
 
-    Parameters
-    ----------
-    frame_bgr : H × W × 3 BGR uint8 numpy array
-    threshold : confidence threshold (0.0 – 1.0); lowered to 0.10 to compensate
-                for the sim-to-real domain gap in synthetic PyBullet renders
 
-    Returns
-    -------
-    List of (x1, y1, x2, y2) integer bounding boxes, one per detection.
-    Empty list when no adult SLF are found.
-    """
-    # BGR → RGB (model was trained on RGB images)
-    rgb    = frame_bgr[:, :, ::-1].copy()
-    tensor = _transform(rgb)
-    tensor = torch.unsqueeze(tensor, 0)
+def get_active_model() -> str | None:
+    return _active_model
 
-    with torch.no_grad():
-        outputs = _model(tensor.to(DEVICE))
 
-    outputs = [{k: v.to("cpu") for k, v in t.items()} for t in outputs]
+def get_threshold() -> float:
+    return _threshold
 
-    boxes = []
-    if len(outputs[0]["boxes"]) == 0:
-        return boxes
 
-    scores = outputs[0]["scores"].numpy()
-    labels = outputs[0]["labels"].numpy()
-    raw_boxes = outputs[0]["boxes"].numpy().astype(int)
-
-    for box, score, label in zip(raw_boxes, scores, labels):
-        if score >= threshold and CLASSES[label] == _ADULT_CLASS:
-            boxes.append((int(box[0]), int(box[1]), int(box[2]), int(box[3])))
-
-    return boxes
+def get_inference_wait_s() -> float:
+    return _inference_wait_s
