@@ -31,16 +31,28 @@ def init(name: str, cfg: dict) -> None:
     global _model, _threshold, _imgsz
     weights_path = cfg["weights"]
     _threshold = float(cfg.get("threshold", 0.5))
-    _imgsz = cfg.get("imgsz")
+    _imgsz = cfg.get("imgsz", 640)
     print(f"[detector:{name}] Loading {weights_path} ...")
     model = _create_model()
     ckpt = torch.load(weights_path, map_location=_DEVICE)
     state_dict = ckpt.get("model_state_dict", ckpt)
     model.load_state_dict(state_dict)
     model.to(_DEVICE).eval()
-    if _imgsz:
-        model.transform.min_size = (int(_imgsz),)
-        model.transform.max_size = int(_imgsz)
+    # Accept imgsz as int OR [w, h] / (w, h)
+    if isinstance(_imgsz, (list, tuple)):
+        if len(_imgsz) != 2:
+            raise ValueError(f"[detector:frcnn] imgsz must be int or [w,h], got: {_imgsz}")
+        _min_size = int(min(_imgsz[0], _imgsz[1]))
+    else:
+        _min_size = int(_imgsz)
+
+    # torchvision FasterRCNN expects min_size to be an int or tuple of ints
+    model.transform.min_size = (_min_size,)
+
+    # Optional: if you also want to constrain the max resize
+    # _max_size = int(max(_imgsz)) if isinstance(_imgsz, (list, tuple)) else int(_imgsz)
+    # model.transform.max_size = _max_size
+
     _model = model
     print(f"[detector:{name}] Ready on {_DEVICE} | adult_idx={ADULT_IDX} "
           f"| threshold={_threshold} | imgsz={_imgsz}")

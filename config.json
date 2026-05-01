@@ -50,10 +50,10 @@
     "active_model": "frcnn",
     "models": {
       "frcnn": {
-        "weights": "models/frcnn/weights.pth",
+        "weights": "models/frcnn/fasterrcnn.pth",
         "threshold": 0.5,
-        "imgsz": null,
-        "inference_wait_seconds": 5.77
+        "imgsz": [3840, 2160],
+        "inference_wait_seconds": 0.6456
       },
       "fcos": {
         "weights": "models/fcos/fcos.pth",
@@ -62,26 +62,26 @@
         "inference_wait_seconds": 5.77
       },
       "retinanet_gn": {
-        "weights": "models/retinanet_gn/weights.pth",
+        "weights": "models/retinanet_gn/retinanetgn.pth",
         "threshold": 0.5,
         "imgsz": null,
         "inference_wait_seconds": 5.77
       },
       "retinanet_bn": {
-        "weights": "models/retinanet_bn/weights.pth",
+        "weights": "models/retinanet_bn/retinanetbn.pth",
         "threshold": 0.5,
         "imgsz": null,
         "inference_wait_seconds": 5.77
       },
       "yolo11": {
-        "weights": "models/yolo/yolo11.pt",
+        "weights": "models/yolo/yolo11_best.pt",
         "threshold": 0.25,
         "imgsz": 640,
         "device": 0,
         "inference_wait_seconds": 1.0
       },
       "yolo26": {
-        "weights": "models/yolo/yolo26.pt",
+        "weights": "models/yolo/yolo26_best.pt",
         "threshold": 0.25,
         "imgsz": 640,
         "device": 0,
@@ -93,11 +93,11 @@
         "inference_wait_seconds": 2.0
       },
       "mobilenetv3": {
-        "weights": "models/mobilenetv3/weights.pth",
+        "weights": "models/mobilenetv3/mobilenet_v3_5Classes.pth",
         "label_path": "models/mobilenetv3/label.txt",
         "threshold": 0.5,
-        "imgsz": [3840, 2160],
-        "inference_wait_seconds": 0.05
+        "imgsz": [1280, 720],
+        "inference_wait_seconds": 0.19
       }
     }
   }

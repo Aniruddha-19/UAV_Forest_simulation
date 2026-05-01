@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from camera import IMG_W, IMG_H
+from detector import get_active_model
 
 
 # ── Frame annotation ──────────────────────────────────────────────────────────
@@ -159,6 +160,7 @@ def _draw_hud(img: np.ndarray,
                    if state == "INSPECT"
                    else "Radius : —")
 
+    model_label = (get_active_model() or "model").upper()
     hud_lines = [
         f"State  : {state}",
         f"Tree   : {tree_label}  ({tree_idx} / {total_trees})",
@@ -168,7 +170,7 @@ def _draw_hud(img: np.ndarray,
         (f"Pos    : ({drone_pos[0]:.1f},  {drone_pos[1]:.1f},"
          f"  {drone_pos[2]:.1f}) m"),
         radius_line,
-        f"RCNN   : {n_rcnn} detection{'s' if n_rcnn != 1 else ''}",
+        f"{model_label:<7}: {n_rcnn} detection{'s' if n_rcnn != 1 else ''}",
         f"SLF    : {detect_pct:.1f}%  ({infer_count} inferences)",
     ]
 

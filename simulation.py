@@ -40,6 +40,7 @@ Controls: press 'q' in either window to quit.
 """
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -65,33 +66,36 @@ from visualizer       import annotate, close_windows
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 CAMERA_FPS      = 30.0
+VIDEO_FPS       = 30.0
 WINDOW_FEED     = "Camera Feed  (30 fps)"
 WINDOW_MODEL    = "Model Output"
 
-# Half-angle within which a panel is considered visible by the camera
-_VIS_HALF_ANGLE = math.radians(30.0)
+_TEST_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "simulation_test_data")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _angle_diff(a: float, b: float) -> float:
-    """Smallest signed difference a − b, wrapped to (−π, π]."""
-    return math.atan2(math.sin(a - b), math.cos(a - b))
-
-
-def _select_frame(panel_data: list[dict],
-                  facing: float,
-                  bark_frame: np.ndarray) -> np.ndarray:
+def _load_video_frames(images_dir: str,
+                       cam_w: int, cam_h: int) -> list[np.ndarray]:
     """
-    Return the image of the panel closest to *facing* if any panel is within
-    _VIS_HALF_ANGLE, otherwise return *bark_frame*.
+    Load every image in *images_dir* (sorted) as a list of BGR ndarrays
+    resized to (cam_w, cam_h). Used as the looping camera feed during
+    INSPECT — 300 images at 30 fps = a 10 s clip.
     """
-    in_fov = [p for p in panel_data
-              if abs(_angle_diff(p["angle"], facing)) <= _VIS_HALF_ANGLE]
-    if not in_fov:
-        return bark_frame
-    best = min(in_fov, key=lambda p: abs(_angle_diff(p["angle"], facing)))
-    return best["bgr"] if best["bgr"] is not None else bark_frame
+    paths = sorted(
+        f for ext in ("*.png", "*.jpg", "*.jpeg")
+        for f in glob.glob(os.path.join(images_dir, ext))
+    )
+    frames: list[np.ndarray] = []
+    for p in paths:
+        img = cv2.imread(p)
+        if img is None:
+            continue
+        if img.shape[:2] != (cam_h, cam_w):
+            img = cv2.resize(img, (cam_w, cam_h))
+        frames.append(img)
+    return frames
 
 
 # ── Inference thread ──────────────────────────────────────────────────────────
@@ -142,10 +146,9 @@ def print_banner(config: dict, n_panels: int,
     print("  UAV Tree Inspection  —  Adult SLF Detection")
     print("=" * 60)
     print(f"  Trees          : {len(config['trees'])}")
-    print(f"  SLF panels     : {n_panels}  (distributed across trees)")
+    print(f"  SLF panels     : {n_panels}  (scenery only — camera plays video)")
     print(f"  Resolution     : {cam_w} × {cam_h}")
     print(f"  Camera FPS     : {CAMERA_FPS:.0f}")
-    print(f"  Panel FOV      : ±{math.degrees(_VIS_HALF_ANGLE):.0f}°")
     print(f"  Inspect alt    : {inspect_alt} m")
     print(f"  Trunk clearance: {trunk_clr} m")
     print(f"  Orbit speed    : {orbit_spd} °/s  "
@@ -184,33 +187,20 @@ def run(config_path: str) -> None:
     drone_id = spawn_drone(config["drone"]["start_position"])
     controller = DroneController(drone_id, config, config["trees"])
 
-    # ── Preload panel images keyed by tree ────────────────────────────────────
-    # For each panel: store its bearing angle from the trunk centre and its
-    # BGR image resized to the configured camera resolution.
-    # This is the data the camera uses during INSPECT to pick what to show.
-    trunk_pos_map = {t["id"]: t["position"] for t in config["trees"]}
-    tree_slf_data: dict[str, list[dict]] = {}
-
-    for panel in slf_data:
-        tp    = trunk_pos_map[panel["tree_id"]]
-        px, py = panel["position"][0], panel["position"][1]
-        angle  = math.atan2(py - tp[1], px - tp[0])
-
-        bgr = None
-        if panel.get("image_path"):
-            raw = cv2.imread(panel["image_path"])
-            if raw is not None:
-                bgr = cv2.resize(raw, (cam_w, cam_h))
-
-        tree_slf_data.setdefault(panel["tree_id"], []).append({
-            "id":    panel["id"],
-            "angle": angle,
-            "bgr":   bgr,
-        })
-
-    loaded = sum(1 for ps in tree_slf_data.values()
-                 for p in ps if p["bgr"] is not None)
-    print(f"[sim] Preloaded {loaded} / {len(slf_data)} panel images.")
+    # ── Preload the 10 s video clip ────────────────────────────────────────────
+    # The simulation_test_data/ folder holds 300 images. Loaded once at camera
+    # resolution into RAM, they form a 10 s @ 30 fps clip that the drone
+    # camera "plays back" during every INSPECT (looping if INSPECT runs
+    # longer than 10 s). Inference samples whatever frame is current at the
+    # moment its waiting-time cycle ends.
+    _video_frames = _load_video_frames(_TEST_DATA_DIR, cam_w, cam_h)
+    if not _video_frames:
+        raise RuntimeError(
+            f"No images found in {_TEST_DATA_DIR} — cannot build video feed.")
+    _video_len = len(_video_frames)
+    _video_duration_s = _video_len / VIDEO_FPS
+    print(f"[sim] Loaded {_video_len} video frames "
+          f"({_video_duration_s:.1f} s @ {VIDEO_FPS:.0f} fps, looped per tree).")
 
     # ── Inference thread ──────────────────────────────────────────────────────
     _frame_q  = queue.Queue(maxsize=1)
@@ -235,6 +225,8 @@ def run(config_path: str) -> None:
         _infer_count   = 0
         _detect_count  = 0
         _current_frame = _BARK_FRAME   # what the camera sees right now
+        _prev_state    = None          # to detect INSPECT entry
+        _inspect_step_start = 0        # physics_step at which current INSPECT began
 
         # Placeholder shown in Window 2 before first inference
         _blank_win2 = _BARK_FRAME.copy()
@@ -261,15 +253,19 @@ def run(config_path: str) -> None:
                 physics_step += 1
 
                 # ── Block A: update camera frame (every physics step) ─────────
-                # Recompute which panel (if any) the drone is currently facing.
-                # This runs at 100 Hz so the frame is always up to date.
-                if (controller.state == DroneController.INSPECT
-                        and controller.current_tree is not None):
-
-                    panels  = tree_slf_data.get(
-                        controller.current_tree["id"], [])
-                    facing  = controller.current_yaw + math.pi
-                    _current_frame = _select_frame(panels, facing, _BARK_FRAME)
+                # During INSPECT the camera plays back the preloaded video
+                # clip. The clock resets at each INSPECT entry, so every tree
+                # starts at frame 0; if INSPECT outlasts the clip the index
+                # wraps via modulo. Outside INSPECT the live frame is whatever
+                # PyBullet renders for the drone (handled in the display
+                # block below).
+                if controller.state == DroneController.INSPECT:
+                    if _prev_state != DroneController.INSPECT:
+                        _inspect_step_start = physics_step
+                    elapsed_s  = (physics_step - _inspect_step_start) * dt
+                    frame_idx  = int(elapsed_s * VIDEO_FPS) % _video_len
+                    _current_frame = _video_frames[frame_idx]
+                _prev_state = controller.state
 
                 # ── Block B: inference dispatch (every physics step) ──────────
                 # Collect result if worker just finished.
